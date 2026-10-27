@@ -92,6 +92,28 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 .ring img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; background: var(--surface); }
 .strip span { font-size: 12px; color: var(--muted); max-width: 70px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* ---------------------------------------------------------------- group chips */
+.chips { display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; padding: 2px 16px 14px; }
+.chips::-webkit-scrollbar { display: none; }
+.chips button, .member button {
+  flex: none; border: 1px solid var(--line); background: var(--surface); color: var(--muted);
+  padding: 6px 14px; border-radius: 99px; font-size: 13.5px; font-weight: 600; cursor: pointer;
+}
+.chips button[aria-selected="true"], .member button[aria-pressed="true"] { background: var(--text); border-color: var(--text); color: var(--bg); }
+.member { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.member button { padding: 3px 10px; font-size: 12px; }
+.groups-box { margin-top: 6px; }
+.group-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 10px; }
+.group-list .hint { margin: 0; }
+.chip-static { display: inline-flex; align-items: center; gap: 6px; padding: 4px 6px 4px 12px; border-radius: 99px;
+  background: var(--surface); border: 1px solid var(--line); font-size: 13.5px; font-weight: 600; }
+.chip-static small { color: var(--muted); font-weight: 500; }
+.chip-static button { background: none; border: 0; padding: 2px; color: var(--muted); cursor: pointer; display: grid; }
+.chip-static button svg { width: 16px; height: 16px; }
+.new-group { display: flex; gap: 8px; }
+.new-group input { flex: 1; min-width: 0; font: inherit; font-size: 15px; padding: 8px 14px; border-radius: 99px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--text); }
+
 /* ---------------------------------------------------------------- feed cards */
 .card { margin: 0 0 28px; }
 .card-head { display: flex; align-items: center; gap: 10px; padding: 0 16px 10px; }
@@ -179,6 +201,7 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 /* ---------------------------------------------------------------- reels */
 .reels { height: calc(100dvh - var(--tabs-h) - 52px - env(safe-area-inset-top)); overflow-y: auto; scroll-snap-type: y mandatory; scrollbar-width: none; }
 .reels::-webkit-scrollbar { display: none; }
+.reels.with-chips { height: calc(100dvh - var(--tabs-h) - 52px - 50px - env(safe-area-inset-top)); }
 .reel { position: relative; height: 100%; scroll-snap-align: start; background: #000; display: grid; place-items: center; }
 .reel video { width: 100%; height: 100%; object-fit: contain; }
 .reel .reel-meta { position: absolute; left: 0; right: 0; bottom: 0; padding: 60px 16px 16px; color: #fff; background: linear-gradient(transparent, rgba(0,0,0,.7)); pointer-events: none; }

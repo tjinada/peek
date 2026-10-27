@@ -239,16 +239,39 @@ function empty(title, body, action = "") {
 
 /* ================================================================ views */
 
+// Group filter for Feed and Reels. The choice is remembered per device.
+async function groupBar() {
+  const { groups } = await api("/api/groups").catch(() => ({ groups: [] }));
+  let gid = +localStorageGet("peek.group") || 0;
+  if (gid && !groups.some((g) => g.id === gid)) gid = 0;
+  const html = groups.length ? `<div class="chips" role="tablist" aria-label="Filter by group">
+      <button role="tab" data-g="0" aria-selected="${!gid}">All</button>
+      ${groups.map((g) => `<button role="tab" data-g="${g.id}" aria-selected="${g.id === gid}">${esc(g.name)}</button>`).join("")}
+    </div>` : "";
+  return { gid, html };
+}
+
+function wireGroupBar(root) {
+  $$(".chips button", root).forEach((b) => b.addEventListener("click", () => {
+    localStorageSet("peek.group", b.dataset.g);
+    render();
+  }));
+}
+
 let stopPolling = () => {};
 
 async function feedView() {
-  view.innerHTML = `<div class="strip" id="strip" hidden></div><div id="cards"><div class="loading"></div></div><div id="more"></div>`;
+  const { gid, html } = await groupBar();
+  const gq = gid ? `&group=${gid}` : "";
+  view.innerHTML = `<div class="strip" id="strip" hidden></div>${html}<div id="cards"><div class="loading"></div></div><div id="more"></div>`;
+  wireGroupBar(view);
   loadStrip();
   const cards = $("#cards");
-  const first = await api("/api/feed");
+  const first = await api(`/api/feed?_=1${gq}`);
   if (!first.posts.length) {
     const s = await api("/api/status");
-    cards.innerHTML = s.following
+    cards.innerHTML = gid ? empty("Nothing in this group yet", "Posts from accounts in this group show up here. Add accounts to it on the Following page.")
+      : s.following
       ? empty("Nothing cached yet", "Posts from the accounts you follow show up here after their first refresh. That usually takes a minute or two.")
       : empty("Your feed is empty", "Follow a few public accounts and their posts will collect here.", `<a class="btn primary" href="#/search">${I.plus}Look someone up</a>`);
     return;
@@ -268,13 +291,13 @@ async function feedView() {
       `<div class="caught-up" role="separator"><span>You're caught up</span><small>Posts below were here last time</small></div>`);
   };
   placeMarker();
-  if (!seenAt || newest > seenAt) {
+  if (!gid && (!seenAt || newest > seenAt)) {  // a filtered view hasn't seen the other groups
     setTimeout(() => api("/api/feed/seen", { method: "POST", body: { ts: newest } }).catch(() => {}), 2000);
   }
 
   let next = first.next;
   if (next) onSentinel($("#more"), async () => {
-    const page = await api(`/api/feed?before=${next}`);
+    const page = await api(`/api/feed?before=${next}${gq}`);
     const frag = document.createElement("div");
     frag.innerHTML = page.posts.map(cardHTML).join("");
     wireCards(frag);
@@ -302,12 +325,17 @@ async function loadStrip() {
 
 async function reelsView() {
   view.innerHTML = `<div class="loading"></div>`;
-  let { posts, next } = await api("/api/feed?kind=reels&limit=8");
+  const { gid, html } = await groupBar();
+  const gq = gid ? `&group=${gid}` : "";
+  let { posts, next } = await api(`/api/feed?kind=reels&limit=8${gq}`);
   if (!posts.length) {
-    view.innerHTML = empty("No reels yet", "Reels and videos from the accounts you follow land here once they're cached.");
+    view.innerHTML = html + empty("No reels yet", gid ? "Reels from accounts in this group land here once they're cached."
+      : "Reels and videos from the accounts you follow land here once they're cached.");
+    wireGroupBar(view);
     return;
   }
-  view.innerHTML = `<div class="reels" id="reels"></div>`;
+  view.innerHTML = `${html}<div class="reels${html ? " with-chips" : ""}" id="reels"></div>`;
+  wireGroupBar(view);
   const box = $("#reels");
   const reelHTML = (p) => {
     const v = p.media.find((m) => m.video && m.src) || p.media[0];
@@ -332,7 +360,7 @@ async function reelsView() {
   const tail = document.createElement("div");
   box.append(tail);
   if (next) onSentinel(tail, async () => {
-    const page = await api(`/api/feed?kind=reels&limit=8&before=${next}`);
+    const page = await api(`/api/feed?kind=reels&limit=8&before=${next}${gq}`);
     tail.remove(); add(page.posts); box.append(tail);
     next = page.next;
     return !!next;
@@ -419,8 +447,21 @@ function rememberRecent(u) {
 async function followingView() {
   view.innerHTML = `<div class="page-pad"><h1 class="page-title">Following</h1>
     <form class="lookup" id="add"><input name="u" placeholder="Add a username" autocomplete="off" autocapitalize="off" spellcheck="false" required aria-label="Username to follow"><button class="btn primary">${I.plus}Follow</button></form>
+    <section class="groups-box">
+      <h2 class="sub">Groups</h2>
+      <div class="group-list" id="group-list"></div>
+      <form class="new-group" id="new-group"><input name="g" placeholder="New group, e.g. Friends" maxlength="30" autocomplete="off" required aria-label="New group name"><button class="btn">${I.plus}Add</button></form>
+    </section>
     <ul class="people" id="people"><li class="loading"></li></ul>
     <div class="status-box" id="status"></div></div>`;
+
+  $("#new-group").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      await api("/api/groups", { method: "POST", body: { name: e.target.g.value } });
+      render();
+    } catch (err) { toast(err.message); }
+  });
 
   $("#add").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -433,7 +474,16 @@ async function followingView() {
     } catch (err) { toast(err.message); }
   });
 
-  const [{ accounts }, s] = await Promise.all([api("/api/accounts"), api("/api/status")]);
+  const [{ accounts }, s, { groups }] = await Promise.all([api("/api/accounts"), api("/api/status"), api("/api/groups")]);
+  $("#group-list").innerHTML = groups.length
+    ? groups.map((g) => `<span class="chip-static">${esc(g.name)} <small>${g.count}</small>
+        <button data-del-group="${g.id}" data-name="${esc(g.name)}" aria-label="Delete group ${esc(g.name)}">${I.close}</button></span>`).join("")
+    : `<p class="hint">Group accounts (friends, photographers…) to filter the feed and reels by group.</p>`;
+  $$("[data-del-group]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm(`Delete the group "${b.dataset.name}"? The accounts stay followed.`)) return;
+    await api(`/api/groups/${b.dataset.delGroup}`, { method: "DELETE" });
+    render();
+  }));
   const ul = $("#people");
   ul.innerHTML = accounts.length ? accounts.map((a) => `<li>
       <a href="#/u/${esc(a.username)}"><img class="avatar" src="${esc(a.avatar || AVATAR_FALLBACK)}" alt=""></a>
@@ -441,9 +491,18 @@ async function followingView() {
         <a href="#/u/${esc(a.username)}">${esc(a.username)}</a>${a.busy ? '<span class="dot-busy" title="Refreshing"></span>' : ""}
         ${a.last_error ? `<small class="err">${esc(a.last_error)}</small>`
           : `<small>${a.fetched_at ? `Checked ${ago(a.fetched_at)} ago` : "Waiting for first fetch"}${a.latest_post ? `, latest post ${ago(a.latest_post)}` : ""}</small>`}
+        ${groups.length ? `<div class="member" data-user="${esc(a.username)}">${groups.map((g) =>
+          `<button aria-pressed="${a.groups.includes(g.id)}" data-g="${g.id}">${esc(g.name)}</button>`).join("")}</div>` : ""}
       </div>
       <button class="btn" data-unfollow="${esc(a.username)}">Unfollow</button>
     </li>`).join("") : `<li>${empty("Not following anyone", "Add a public account above. Peek checks everyone you follow every few hours in the background.")}</li>`;
+
+  $$(".member", ul).forEach((box) => $$("button", box).forEach((b) => b.addEventListener("click", async () => {
+    b.setAttribute("aria-pressed", b.getAttribute("aria-pressed") !== "true");
+    const ids = $$("button[aria-pressed='true']", box).map((x) => +x.dataset.g);
+    try { await api(`/api/accounts/${encodeURIComponent(box.dataset.user)}/groups`, { method: "PUT", body: { ids } }); }
+    catch (err) { toast(err.message); render(); }
+  })));
 
   $$("[data-unfollow]", ul).forEach((b) => b.addEventListener("click", async () => {
     const u = b.dataset.unfollow;

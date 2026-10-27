@@ -228,12 +228,15 @@ def status():
 
 
 @app.get("/api/feed")
-def feed(before: float | None = None, limit: int = 18, kind: str | None = None):
+def feed(before: float | None = None, limit: int = 18, kind: str | None = None, group: int | None = None):
     limit = max(1, min(limit, 60))
     sql = """SELECT p.*, a.avatar, a.full_name FROM posts p
              JOIN accounts a ON a.username = p.username
              WHERE a.followed = 1"""
     args: list = []
+    if group:
+        sql += " AND p.username IN (SELECT username FROM account_groups WHERE group_id = ?)"
+        args.append(group)
     if before:
         sql += " AND p.taken_at < ?"
         args.append(before)
@@ -303,7 +306,65 @@ def accounts():
         """SELECT a.*, (SELECT MAX(taken_at) FROM posts p WHERE p.username=a.username) AS latest_post
            FROM accounts a WHERE followed=1 ORDER BY username"""
     )
-    return {"accounts": [_account_out(a) for a in rows]}
+    member: dict[str, list[int]] = {}
+    for r in db.rows("SELECT username, group_id FROM account_groups"):
+        member.setdefault(r["username"], []).append(r["group_id"])
+    out = []
+    for a in rows:
+        a = _account_out(a)
+        a["groups"] = member.get(a["username"], [])
+        out.append(a)
+    return {"accounts": out}
+
+
+# ---------------------------------------------------------------- groups
+
+
+@app.get("/api/groups")
+def groups():
+    return {"groups": db.rows(
+        """SELECT g.id, g.name, COUNT(a.username) AS count FROM groups g
+           LEFT JOIN account_groups ag ON ag.group_id = g.id
+           LEFT JOIN accounts a ON a.username = ag.username AND a.followed = 1
+           GROUP BY g.id ORDER BY g.name COLLATE NOCASE""")}
+
+
+class GroupIn(BaseModel):
+    name: str
+
+
+@app.post("/api/groups")
+def create_group(body: GroupIn):
+    name = " ".join(body.name.split())[:30]
+    if not name:
+        raise HTTPException(400, "Give the group a name")
+    if db.one("SELECT 1 AS x FROM groups WHERE name = ? COLLATE NOCASE", (name,)):
+        raise HTTPException(409, f"There's already a group called {name}")
+    with db.conn() as c:
+        gid = c.execute("INSERT INTO groups (name) VALUES (?)", (name,)).lastrowid
+    return {"id": gid, "name": name, "count": 0}
+
+
+@app.delete("/api/groups/{gid}")
+def delete_group(gid: int):
+    with db.conn() as c:
+        c.execute("DELETE FROM account_groups WHERE group_id=?", (gid,))
+        c.execute("DELETE FROM groups WHERE id=?", (gid,))
+    return {"ok": True}
+
+
+class Membership(BaseModel):
+    ids: list[int]
+
+
+@app.put("/api/accounts/{username}/groups")
+def set_groups(username: str, body: Membership):
+    u = _clean(username)
+    valid = {r["id"] for r in db.rows("SELECT id FROM groups")}
+    with db.conn() as c:
+        c.execute("DELETE FROM account_groups WHERE username=?", (u,))
+        c.executemany("INSERT INTO account_groups VALUES (?,?)", [(u, g) for g in set(body.ids) & valid])
+    return {"ok": True}
 
 
 class Follow(BaseModel):
