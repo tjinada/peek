@@ -975,12 +975,12 @@ def load_older_reels(username: str, count: int = 12) -> dict:
     if not logged_in():
         raise FetchError("Instagram only shows the Reels tab with a login. Add a burner session to load it.")
     _check_cooldown()
-    with _lock:
-        _busy.add(username)
-        try:
+    _busy.add(username)
+    try:
+        with _lock:
             res = _load_older_reels_locked(username, count)
-        finally:
-            _busy.discard(username)
+    finally:
+        _busy.discard(username)
     queue_downloads(username)
     return res
 
@@ -1004,7 +1004,8 @@ def _load_older_reels_locked(username: str, count: int) -> dict:
             if sc:
                 codes.append(sc)
                 added += 1
-    except (LoginRequiredException, ConnectionException, QueryReturnedNotFoundException) as e:
+    except (LoginRequiredException, ConnectionException, QueryReturnedNotFoundException,
+            BadResponseException) as e:
         note = _friendly(e)
         log.info("%s: load older reels stopped: %s", username, note)
     _save_cursor(username, it, done, tab="reels")
