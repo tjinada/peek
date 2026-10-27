@@ -657,7 +657,7 @@ function sessionBanner(s) {
 
 function sessionCardHTML(s) {
   const when = s.checked_at ? `checked ${ago(s.checked_at)}${ago(s.checked_at).endsWith("now") ? "" : " ago"}` : "not checked yet";
-  const line = s.state === "ok" ? `<span class="pill ok">Working</span> Logged in as <b>@${esc(s.username)}</b>, ${when}.`
+  const line = s.state === "ok" ? `<span class="pill ok">Working</span> Logged in${s.username ? ` as <b>@${esc(s.username)}</b>` : ""}, ${when}.`
     : s.state === "unchecked" ? `<span class="pill">Not checked</span> Session ${esc(s.hint)} from ${s.source === "env" ? "the server config" : "here"}, ${when}.`
     : s.state === "dead" ? `<span class="pill bad">Expired</span> ${esc(s.error || "Instagram no longer accepts this session.")}`
     : `<span class="pill">Off</span> No burner session. Peek runs logged out: no stories, highlights, Reels tab or restricted profiles.`;
@@ -705,7 +705,7 @@ function wireSessionCard(box, s) {
     try {
       const next = await api("/api/session", { method: "POST", body });
       repaint(next);
-      toast(`Logged in as @${next.username}`);
+      toast(next.username ? `Logged in as @${next.username}` : "Session saved and working");
     } catch (ex) {
       err.textContent = ex.message; err.hidden = false;
       btn.disabled = false; btn.textContent = "Check and save";

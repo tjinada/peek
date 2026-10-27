@@ -280,27 +280,56 @@ def init_session():
     _reload_loader()
 
 
+LIMITED_NOTE = ("Instagram answered with \"feedback_required\" (an activity limit), but it knows who the "
+                "session is, so it still counts as working.")
+
+
 def _probe_session(cookies: dict, username: str | None) -> dict:
-    """Ask Instagram who this session belongs to. One request, on a throwaway loader, and a
-    429 here doesn't pause the rest of Peek."""
+    """Ask Instagram who this session belongs to, on a throwaway loader (a 429 here doesn't
+    pause the rest of Peek). Two plain reads, in order:
+      1. api/v1/accounts/current_user/ (without ?edit=true: that loads the edit-profile form,
+         which Instagram answers with feedback_required for accounts that work fine)
+      2. the logged-in GraphQL profile query for the session's own user id
+    Only a login error means the session is dead. A feedback_required means Instagram
+    recognised the session, so it counts as working."""
     t = _make_loader_plain(watch=False)
     t.load_session(username or "burner", cookies)
+    uid = cookies["ds_user_id"]
+    limited = False
+    errors = []
+
+    def own_profile():
+        p = instaloader.Profile(t.context, {"id": int(uid), "username": ""})
+        p._obtain_metadata()
+        return {"user": {"username": p.username}}
+
     _probe.on = True
     try:
-        data = t.context.get_json("api/v1/accounts/current_user/", {"edit": "true"})
-    except TooManyRequestsException:
-        return {"state": "unknown", "error": "Instagram is rate-limiting right now (429). Try again in a few minutes."}
-    except Exception as e:
-        why = _dead_reason(e)
-        if why:
-            return {"state": "dead", "error": why}
-        return {"state": "unknown", "error": f"Couldn't reach Instagram to check: {str(e)[:160]}"}
+        for name, fetch in (("current_user", lambda: t.context.get_json("api/v1/accounts/current_user/", {})),
+                            ("own profile", own_profile)):
+            try:
+                data = fetch()
+            except TooManyRequestsException:
+                errors.append("Instagram is rate-limiting right now (429). Try again in a few minutes.")
+                continue
+            except Exception as e:
+                why = _dead_reason(e)
+                if why:
+                    return {"state": "dead", "error": why}
+                if "feedback_required" in str(e) or "feedback_required" in str(e.__cause__ or ""):
+                    limited = True
+                log.info("session check via %s failed: %s", name, str(e)[:200])
+                errors.append(f"Couldn't reach Instagram to check: {str(e)[:160]}")
+                continue
+            user = (data or {}).get("user") or {}
+            if user.get("username"):
+                return {"state": "ok", "username": user["username"].lower(), "error": None}
+            log.info("session check via %s returned no user", name)
     finally:
         _probe.on = False
-    user = (data or {}).get("user") or {}
-    if user.get("username"):
-        return {"state": "ok", "username": user["username"].lower(), "error": None}
-    return {"state": "dead", "error": "Instagram didn't recognise this session."}
+    if limited:
+        return {"state": "ok", "username": None, "error": LIMITED_NOTE}
+    return {"state": "unknown", "error": errors[0] if errors else "Instagram didn't say whose session this is."}
 
 
 def session_info() -> dict:
@@ -331,10 +360,10 @@ def set_session(fields: dict) -> dict:
     if res["state"] != "ok":
         raise SessionError(res["error"], res["state"])
     row = _session_row() or {}
-    _write_session(username=res["username"], **cand, state="ok", checked_at=time.time(), last_error=None,
+    _write_session(username=res["username"], **cand, state="ok", checked_at=time.time(), last_error=res["error"],
                    source="ui", env_hash=row.get("env_hash"), saved_at=time.time())
     _reload_loader()
-    log.info("session replaced from the UI: %s", res["username"])
+    log.info("session replaced from the UI: %s", res["username"] or "(name not returned)")
     return session_info()
 
 
