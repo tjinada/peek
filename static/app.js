@@ -37,6 +37,7 @@ const I = {
   plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>',
   check: '<svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
   mark: '<svg viewBox="0 0 24 24"><path d="M6.5 4h11a1 1 0 0 1 1 1v15l-6.5-4.5L5.5 20V5a1 1 0 0 1 1-1z"/></svg>',
+  up: '<svg viewBox="0 0 24 24"><path d="M12 19V6m0 0l-5 5m5-5l5 5"/></svg>',
   marked: '<svg viewBox="0 0 24 24"><path d="M6.5 4h11a1 1 0 0 1 1 1v15l-6.5-4.5L5.5 20V5a1 1 0 0 1 1-1z" fill="currentColor"/></svg>',
 };
 
@@ -392,6 +393,7 @@ function empty(title, body, action = "") {
 /* ================================================================ views */
 
 // Group filter for Feed and Reels. The choice is remembered per device.
+const currentGroup = () => +localStorageGet("peek.group") || 0;
 async function groupBar() {
   const { groups } = await api("/api/groups").catch(() => ({ groups: [] }));
   let gid = +localStorageGet("peek.group") || 0;
@@ -416,9 +418,13 @@ async function feedView(seq = renderSeq) {
   const { gid, html } = await groupBar();
   if (moved(seq)) return;
   const gq = gid ? `&group=${gid}` : "";
-  view.innerHTML = `<div class="strip" id="strip" hidden></div>${html}<div id="cards"><div class="loading"></div></div><div id="more"></div>`;
+  view.innerHTML = `<div class="strip-wrap" id="strip-wrap" hidden>
+      <div class="strip" id="strip"></div>
+      <button class="strip-nav prev" aria-label="Scroll stories left" hidden>${I.chevL}</button>
+      <button class="strip-nav next" aria-label="Scroll stories right" hidden>${I.chevR}</button>
+    </div>${html}<div id="cards"><div class="loading"></div></div><div id="more"></div>`;
   wireGroupBar(view);
-  loadStrip();
+  loadStrip(gid);
   const cards = $("#cards");
   const first = await api(`/api/feed?_=1${gq}`);
   if (moved(seq)) return;
@@ -449,6 +455,8 @@ async function feedView(seq = renderSeq) {
     setTimeout(() => api("/api/feed/seen", { method: "POST", body: { ts: newest } }).catch(() => {}), 2000);
   }
 
+  watchNewPosts(cards, newest, gq, seq);
+
   let next = first.next;
   if (next) onSentinel($("#more"), async () => {
     const page = await api(`/api/feed?before=${next}${gq}`);
@@ -462,19 +470,63 @@ async function feedView(seq = renderSeq) {
   });
 }
 
+// "New posts" pill: polls the local DB (no Instagram requests) for posts newer than the top
+// of the feed. Faster while a refresh is running. Stops when the feed is left.
+function watchNewPosts(cards, newest, gq, seq) {
+  const pill = document.createElement("button");
+  pill.className = "new-pill";
+  pill.hidden = true;
+  pill.addEventListener("click", () => { window.scrollTo(0, 0); render(); });
+  document.body.append(pill);
+  const tick = async () => {
+    if (!cards.isConnected || moved(seq)) return pill.remove();
+    const r = await api(`/api/feed/new?since=${newest}${gq}`).catch(() => null);
+    if (!cards.isConnected || moved(seq)) return pill.remove();
+    if (r?.count) {
+      pill.innerHTML = `${I.up}${r.count} new post${r.count === 1 ? "" : "s"}`;
+      pill.hidden = false;
+    }
+    setTimeout(tick, r?.refreshing ? 8000 : 30000);
+  };
+  setTimeout(tick, 4000);
+}
+
 let storyGroups = [];
-async function loadStrip() {
-  const strip = $("#strip");
+async function loadStrip(gid = 0) {
+  const wrap = $("#strip-wrap"), strip = $("#strip");
   try {
-    const { groups } = await api("/api/stories");
+    const { groups } = await api(`/api/stories${gid ? `?group=${gid}` : ""}`);
     storyGroups = groups;
-    if (!groups.length || !strip) return;
-    strip.hidden = false;
+    if (!groups.length || !strip?.isConnected) return;
+    wrap.hidden = false;
     strip.innerHTML = groups.map((g, i) => `<button data-i="${i}" aria-label="Stories from ${esc(g.username)}">
         <span class="ring ${g.all_seen ? "seen" : ""}"><img src="${esc(g.avatar || AVATAR_FALLBACK)}" alt=""></span>
         <span>${esc(g.username)}</span></button>`).join("");
     $$("button", strip).forEach((b) => b.addEventListener("click", () => openStories(+b.dataset.i)));
+    wireStrip(wrap, strip);
   } catch { /* stories are a bonus; never break the feed */ }
+}
+
+// A long row of stories: arrows on wide screens (only while there's more to scroll that way),
+// and a plain mouse wheel scrolls it sideways.
+function wireStrip(wrap, strip) {
+  const prev = $(".strip-nav.prev", wrap), next = $(".strip-nav.next", wrap);
+  const update = () => {
+    prev.hidden = strip.scrollLeft < 4;
+    next.hidden = strip.scrollLeft + strip.clientWidth >= strip.scrollWidth - 4;
+  };
+  const page = (dir) => strip.scrollBy({ left: dir * strip.clientWidth * 0.8,
+    behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+  prev.addEventListener("click", () => page(-1));
+  next.addEventListener("click", () => page(1));
+  strip.addEventListener("scroll", update, { passive: true });
+  strip.addEventListener("wheel", (e) => {
+    if (Math.abs(e.deltaY) <= Math.abs(e.deltaX) || strip.scrollWidth <= strip.clientWidth) return;
+    e.preventDefault();
+    strip.scrollLeft += e.deltaY;
+  }, { passive: false });
+  addEventListener("resize", update);
+  update();
 }
 
 async function reelsView(seq = renderSeq) {
@@ -730,6 +782,7 @@ function wireBulk(accounts, groups) {
     render();
   });
   $("#bulk-bar")?.remove();
+  $(".new-pill")?.remove();
   if (!followSel.on) return;
 
   const bar = document.createElement("div");
@@ -1466,7 +1519,7 @@ function closeStories(repaint = true) {
   if (isStories && st.seen.size) api("/api/stories/seen", { method: "POST", body: { ids: [...st.seen] } }).catch(() => {});
   storyState = null;
   hideOverlay();
-  if (repaint && isStories) loadStrip();
+  if (repaint && isStories) loadStrip(currentGroup());
 }
 
 /* ================================================================ login */
@@ -1505,6 +1558,7 @@ async function render() {
 
   stopPolling();
   $("#bulk-bar")?.remove();
+  $(".new-pill")?.remove();
   if (route !== "following") { followSel.on = false; followSel.picked.clear(); }
   baseRendered = true;
   baseHash = hash;
@@ -1643,15 +1697,75 @@ document.addEventListener("keydown", (e) => {
   if (!$(".login")) pageKeys(e);
 });
 
-$("#refresh-all").addEventListener("click", async (e) => {
-  const btn = e.currentTarget;
+/* ================================================================ refreshing
+   ↻ fetches new posts from Instagram: for the group picked on Feed/Reels, else everyone.
+   It keeps spinning while that runs. Re-tapping the current tab, or pulling down at the
+   top of the feed on a phone, redraws from what's saved (no Instagram requests). */
+
+let refreshWatch = 0;
+function watchRefresh() {
+  const btn = $("#refresh-all");
   btn.classList.add("spinning");
+  clearTimeout(refreshWatch);
+  const check = async () => {
+    const st = await api("/api/status").catch(() => null);
+    if (st?.cycle_running) refreshWatch = setTimeout(check, 5000);
+    else btn.classList.remove("spinning");
+  };
+  refreshWatch = setTimeout(check, 3000);
+}
+
+$("#refresh-all").addEventListener("click", async () => {
+  const route = (location.hash || "#/").split("/")[1] || "feed";
+  const gid = ["feed", "reels"].includes(route) ? currentGroup() : 0;
+  const gname = gid && $(`.chips button[data-g="${gid}"]`)?.textContent;
   try {
-    const r = await api("/api/refresh-all", { method: "POST" });
-    toast(r.already ? "A refresh is already running" : "Refreshing everyone you follow. New posts will trickle in over the next few minutes.");
+    const r = await api(`/api/refresh-all${gid ? `?group=${gid}` : ""}`, { method: "POST" });
+    if (r.already) toast("A refresh is already running");
+    else if (!r.count) return toast(gid ? "Nobody in this group to refresh" : "You're not following anyone yet");
+    else toast(`Checking ${r.count} account${r.count === 1 ? "" : "s"}${gname ? ` in ${gname}` : ""}. New posts appear as they come in.`);
+    watchRefresh();
   } catch (err) { toast(err.message); }
-  setTimeout(() => btn.classList.remove("spinning"), 1500);
 });
+
+// Re-tap the tab you're on: redraw it from scratch, back at the top.
+$$(".tabs a").forEach((a) => a.addEventListener("click", (e) => {
+  if (a.getAttribute("href") !== (location.hash || "#/") || !overlay.hidden) return;
+  e.preventDefault();
+  window.scrollTo(0, 0);
+  render();
+}));
+
+// Pull to refresh at the top of the feed (touch only).
+(() => {
+  const ptr = document.createElement("div");
+  ptr.className = "ptr";
+  ptr.innerHTML = I.refresh;
+  document.body.append(ptr);
+  let y0 = null, x0 = 0, pull = 0;
+  const onFeed = () => ["", "#/"].includes(location.hash) && overlay.hidden && !storyState;
+  addEventListener("touchstart", (e) => {
+    y0 = onFeed() && window.scrollY <= 0 && !e.target.closest(".strip, .chips") ? e.touches[0].clientY : null;
+    x0 = e.touches[0].clientX; pull = 0;
+  }, { passive: true });
+  addEventListener("touchmove", (e) => {
+    if (y0 == null) return;
+    const dy = e.touches[0].clientY - y0, dx = Math.abs(e.touches[0].clientX - x0);
+    if (dy <= 0 || dx > dy || window.scrollY > 0) { pull = 0; ptr.style.cssText = ""; return; }
+    pull = Math.min(dy * 0.5, 90);
+    ptr.style.transform = `translate(-50%, ${pull}px) rotate(${pull * 4}deg)`;
+    ptr.style.opacity = Math.min(1, pull / 60);
+    ptr.classList.toggle("armed", pull >= 60);
+  }, { passive: true });
+  addEventListener("touchend", () => {
+    if (y0 != null && pull >= 60) { ptr.classList.add("spinning"); render().finally(() => { ptr.classList.remove("spinning", "armed"); ptr.style.cssText = ""; }); }
+    else { ptr.classList.remove("armed"); ptr.style.cssText = ""; }
+    y0 = null; pull = 0;
+  });
+})();
+
+// If a refresh is already running when the app opens, show it.
+fetch("/api/status").then((r) => r.ok && r.json()).then((st) => st?.cycle_running && watchRefresh()).catch(() => {});
 
 applyDisplay();
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});

@@ -1,6 +1,6 @@
 // App shell is cached so the PWA opens instantly; API is always network-first;
 // saved media never changes, so it's cache-first.
-const SHELL = "peek-shell-v5";
+const SHELL = "peek-shell-v6";
 const MEDIA = "peek-media-v1";
 const SHELL_FILES = ["/", "/index.html", "/app.css", "/app.js", "/manifest.webmanifest", "/icons/icon-192.png"];
 

@@ -91,7 +91,7 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 /* ---------------------------------------------------------------- story strip */
 .strip {
   display: flex; gap: 14px; overflow-x: auto; padding: 6px 16px 14px;
-  scrollbar-width: none; scroll-snap-type: x proximity;
+  scrollbar-width: none; scroll-snap-type: x proximity; scroll-padding-inline: 16px;
 }
 .strip::-webkit-scrollbar { display: none; }
 .strip button {
@@ -418,3 +418,31 @@ body:has(.bulk-bar) #view { padding-bottom: 140px; }
 .chip-static a svg { width: 16px; height: 16px; }
 .people.selecting li { -webkit-tap-highlight-color: transparent; border-radius: 10px; }
 .people.selecting li:has(.pick:checked) { background: color-mix(in srgb, var(--safelight) 9%, transparent); }
+
+/* ---------------------------------------------------------------- stories row arrows */
+.strip-wrap { position: relative; }
+.strip-wrap[hidden] { display: none; }
+.strip-nav { position: absolute; top: 22px; z-index: 2; width: 34px; height: 34px; padding: 0; border-radius: 50%; display: grid; place-items: center;
+  border: 1px solid var(--line); background: var(--raise); color: var(--text); cursor: pointer; box-shadow: 0 2px 10px rgba(0,0,0,.25); }
+.strip-nav svg { width: 18px; height: 18px; }
+.strip-nav[hidden] { display: none; }
+.strip-nav.prev { left: 2px; }
+.strip-nav.next { right: 2px; }
+@media (hover: none) { .strip-nav { display: none; } }
+
+/* ---------------------------------------------------------------- new posts + pull to refresh */
+.new-pill { position: fixed; top: calc(62px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); z-index: 25;
+  display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px 7px 10px; border-radius: 99px; border: 0; cursor: pointer;
+  background: var(--safelight); color: #1a1408; font-weight: 600; font-size: 0.8438rem; box-shadow: 0 4px 16px rgba(0,0,0,.3);
+  animation: pill-in .25s ease-out; }
+.new-pill svg { width: 16px; height: 16px; stroke-width: 2.2; }
+.new-pill[hidden] { display: none; }
+@keyframes pill-in { from { opacity: 0; transform: translate(-50%, -8px); } }
+.ptr { position: fixed; top: calc(52px + env(safe-area-inset-top)); left: 50%; z-index: 25; width: 36px; height: 36px; margin-top: -40px;
+  display: grid; place-items: center; border-radius: 50%; background: var(--raise); border: 1px solid var(--line); color: var(--muted);
+  opacity: 0; transform: translate(-50%, 0); pointer-events: none; }
+.ptr svg { width: 18px; height: 18px; }
+.ptr.armed { color: var(--safelight); }
+.ptr.spinning { opacity: 1; transform: translate(-50%, 60px); }
+.ptr.spinning svg { animation: spin 1s linear infinite; color: var(--safelight); }
+@media (prefers-reduced-motion: reduce) { .new-pill { animation: none; } }

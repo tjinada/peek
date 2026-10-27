@@ -30,13 +30,19 @@ state = {"last_cycle": None, "next_cycle": None, "cycle_running": False}
 # ---------------------------------------------------------------- background refresh
 
 
-async def refresh_cycle():
-    """Refresh every followed account, one at a time, with human-ish gaps between them."""
+async def refresh_cycle(group: int | None = None):
+    """Refresh every followed account (or just one group's), one at a time, with human-ish
+    gaps between them. Only a full cycle counts for the schedule."""
     if state["cycle_running"]:
         return
     state["cycle_running"] = True
     try:
-        names = [r["username"] for r in db.rows("SELECT username FROM accounts WHERE followed=1 ORDER BY fetched_at")]
+        sql = "SELECT username FROM accounts WHERE followed=1"
+        args: tuple = ()
+        if group:
+            sql += " AND username IN (SELECT username FROM account_groups WHERE group_id=?)"
+            args = (group,)
+        names = [r["username"] for r in db.rows(sql + " ORDER BY fetched_at", args)]
         random.shuffle(names)
         for i, name in enumerate(names):
             try:
@@ -51,9 +57,10 @@ async def refresh_cycle():
                 log.exception("refresh %s failed unexpectedly", name)
             if i < len(names) - 1:
                 await asyncio.sleep(random.uniform(*ACCOUNT_DELAY))
-        await asyncio.to_thread(fetcher.prune_expired_stories)
-        state["last_cycle"] = time.time()
-        db.set_meta("last_cycle", state["last_cycle"])
+        if not group:
+            await asyncio.to_thread(fetcher.prune_expired_stories)
+            state["last_cycle"] = time.time()
+            db.set_meta("last_cycle", state["last_cycle"])
     finally:
         state["cycle_running"] = False
 
@@ -314,6 +321,21 @@ def feed(before: float | None = None, limit: int = 18, kind: str | None = None, 
     return out
 
 
+@app.get("/api/feed/new")
+def feed_new(since: float, kind: str | None = None, group: int | None = None):
+    """How many feed posts are newer than the newest one on screen. Local only, so the feed
+    can poll it cheaply and offer a 'new posts' pill. Also says if a refresh is running."""
+    sql = """SELECT COUNT(*) AS n FROM posts p JOIN accounts a ON a.username = p.username
+             WHERE a.followed = 1 AND p.taken_at > ?"""
+    args: list = [since]
+    if group:
+        sql += " AND p.username IN (SELECT username FROM account_groups WHERE group_id = ?)"
+        args.append(group)
+    if kind == "reels":
+        sql += " AND p.kind IN ('reel','video')"
+    return {"count": db.one(sql, args)["n"], "refreshing": state["cycle_running"]}
+
+
 class FeedSeen(BaseModel):
     ts: float
 
@@ -327,16 +349,17 @@ def feed_seen(body: FeedSeen):
 
 
 @app.get("/api/stories")
-def stories():
-    """Unexpired stories grouped by account, unseen groups first."""
+def stories(group: int | None = None):
+    """Unexpired stories grouped by account, unseen groups first. ?group= limits it to a group."""
     now = time.time()
     items = db.rows(
         """SELECT s.*, a.avatar, (ss.id IS NOT NULL) AS seen FROM stories s
            JOIN accounts a ON a.username = s.username
            LEFT JOIN seen_stories ss ON ss.id = s.id
-           WHERE a.followed = 1 AND s.expires_at > ? AND s.path IS NOT NULL
-           ORDER BY s.taken_at""",
-        (now,),
+           WHERE a.followed = 1 AND s.expires_at > ? AND s.path IS NOT NULL"""
+        + (" AND s.username IN (SELECT username FROM account_groups WHERE group_id = ?)" if group else "")
+        + " ORDER BY s.taken_at",
+        (now, group) if group else (now,),
     )
     groups: dict[str, dict] = {}
     for it in items:
@@ -730,11 +753,17 @@ async def post(shortcode: str):
 
 
 @app.post("/api/refresh-all")
-async def refresh_all():
+async def refresh_all(group: int | None = None):
+    """Refresh everyone followed, or with ?group= only that group's accounts."""
     if state["cycle_running"]:
         return {"ok": True, "already": True}
-    asyncio.create_task(refresh_cycle())
-    return {"ok": True}
+    count = db.one("SELECT COUNT(*) AS n FROM accounts WHERE followed=1"
+                   + (" AND username IN (SELECT username FROM account_groups WHERE group_id=?)" if group else ""),
+                   (group,) if group else ())["n"]
+    if not count:
+        return {"ok": True, "count": 0}
+    asyncio.create_task(refresh_cycle(group))
+    return {"ok": True, "count": count}
 
 
 # ---------------------------------------------------------------- static
