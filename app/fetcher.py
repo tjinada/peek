@@ -74,8 +74,15 @@ class _PauseOn429(instaloader.RateController):
     def handle_429(self, query_type: str) -> None:
         # Don't use query_waittime here: with untracked=True it also arms Instaloader's own
         # "earliest next request" timer, which is what caused the silent 11-minute sleeps.
+        if getattr(_probe, "on", False):
+            # A one-off lookup endpoint refused us. Instagram answers some endpoints with 429
+            # as a flat "no" even when we're nowhere near a limit, so this doesn't pause the rest.
+            raise TooManyRequestsException("429 Too Many Requests (lookup refused)")
         _start_cooldown(COOLDOWN_MIN, f"Instagram returned 429 ({query_type})")
         raise TooManyRequestsException("429 Too Many Requests")
+
+
+_probe = threading.local()
 
 
 def _start_cooldown(seconds: float, why: str):
@@ -141,30 +148,46 @@ def _make_loader_plain() -> instaloader.Instaloader:
 L = _make_loader()
 
 
+class LookupRefused(Exception):
+    pass
+
+
 def _get_profile(username: str) -> instaloader.Profile:
     """Instaloader looks a profile up via its public web page, which shows what a logged-out
     visitor sees. Age- and region-restricted profiles aren't on that page at all, so with a
-    burner session we retry through the profile API, which does use the session."""
+    burner session we look them up the way the Instagram app does, as that session."""
     try:
         return instaloader.Profile.from_username(L.context, username)
     except ProfileNotExistsException:
         if not logged_in():
             raise
-        log.info("%s: not on the public page; trying the profile API with the session", username)
-        try:
-            data = L.context.get_json("api/v1/users/web_profile_info/", params={"username": username})
-        except TooManyRequestsException:
-            raise
-        except Exception as e:
-            log.warning("%s: profile API lookup failed: %s", username, e)
-            raise ProfileNotExistsException(f"Profile {username} does not exist.") from e
-        user = (data.get("data") or {}).get("user") if isinstance(data, dict) else None
-        if not user:
-            log.warning("%s: profile API returned no user either", username)
-            raise ProfileNotExistsException(f"Profile {username} does not exist.")
-        p = instaloader.Profile(L.context, user)
-        p._has_full_metadata = True  # this response is the full profile; skip another request
-        return p
+    log.info("%s: not on the public page; looking it up as the burner via the app API", username)
+    refused = []
+    _probe.on = True
+    try:
+        for name, fetch in (
+            ("app API", lambda: L.context.get_iphone_json("api/v1/users/web_profile_info/", {"username": username})),
+            ("web API", lambda: L.context.get_json("api/v1/users/web_profile_info/", params={"username": username})),
+        ):
+            try:
+                data = fetch()
+            except Exception as e:
+                why = "refused (429)" if "429" in str(e) else str(e)[:120]
+                log.warning("%s: %s lookup %s", username, name, why)
+                refused.append(name)
+                continue
+            user = (data.get("data") or {}).get("user") if isinstance(data, dict) else None
+            if user:
+                log.info("%s: found via the %s", username, name)
+                p = instaloader.Profile(L.context, user)
+                p._has_full_metadata = True  # this response is the full profile
+                return p
+            log.warning("%s: %s returned no profile", username, name)
+    finally:
+        _probe.on = False
+    if refused:
+        raise LookupRefused("Instagram wouldn't return this profile to the burner's session right now")
+    raise ProfileNotExistsException(f"Profile {username} does not exist.")
 
 
 def logged_in() -> bool:
@@ -531,8 +554,13 @@ def _refresh_locked(username: str, with_stories: bool) -> dict:
     try:
         p = _get_profile(username)
     except ProfileNotExistsException:
-        _record_error(username, "Profile doesn't exist")
-        raise FetchError("Profile doesn't exist")
+        msg = ("Not found, or restricted and hidden from the burner" if logged_in()
+               else "Not found, or restricted (age/region) and hidden without a login")
+        _record_error(username, msg)
+        raise FetchError(msg)
+    except LookupRefused as e:
+        _record_error(username, str(e))
+        raise FetchError(str(e))
     except (LoginRequiredException, ConnectionException) as e:
         msg = _friendly(e)
         _record_error(username, msg)
@@ -661,7 +689,9 @@ def _load_older_locked(username: str, count: int) -> dict:
     try:
         p = _get_profile(username)
     except ProfileNotExistsException:
-        raise FetchError("Profile doesn't exist")
+        raise FetchError("Not found, or restricted and hidden from this session")
+    except LookupRefused as e:
+        raise FetchError(str(e))
     except (LoginRequiredException, ConnectionException) as e:
         raise FetchError(_friendly(e))
     if p.is_private and not p.followed_by_viewer:

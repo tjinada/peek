@@ -171,6 +171,8 @@ def _stale(a: dict | None) -> bool:
     poll. The Refresh button still forces one."""
     if a and a.get("tried_at") and time.time() - a["tried_at"] < RETRY_AFTER:
         return False
+    if fetcher.cooldown_until():  # paused: don't queue a fetch that would just fail
+        return False
     return not a or not a.get("fetched_at") or time.time() - a["fetched_at"] > PROFILE_TTL_HOURS * 3600
 
 
