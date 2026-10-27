@@ -791,6 +791,9 @@ SEARCH_PER_HOUR = 30
 _search_cache: dict[str, tuple[float, list]] = {}
 _search_times: list[float] = []
 _search_pics: dict[str, str] = {}  # username -> profile pic URL from the latest results
+# Instagram moved its web search; the current path first, the old one as a fallback.
+SEARCH_PATHS = ["api/v1/web/search/topsearch/", "web/search/topsearch/"]
+_search_path = SEARCH_PATHS[0]
 
 
 class SearchUnavailable(Exception):
@@ -813,11 +816,24 @@ def search_instagram(q: str) -> list[dict]:
     if len(_search_times) >= SEARCH_PER_HOUR:
         raise SearchUnavailable("limit", "Suggestions paused: hourly search limit reached")
     _search_times.append(now)
+    global _search_path
     with _lock:
         _probe.on = True  # a refused search shouldn't pause everything else
         try:
-            node = L.context.get_json("web/search/topsearch/",
-                                      params={"context": "blended", "query": key, "include_reel": False, "__a": 1})
+            node = None
+            paths = [_search_path] + [p for p in SEARCH_PATHS if p != _search_path]
+            for path in paths:
+                try:
+                    node = L.context.get_json(path, params={"context": "blended", "query": key,
+                                                            "include_reel": "false", "__a": 1})
+                    _search_path = path  # remember the one that works
+                    break
+                except QueryReturnedNotFoundException:
+                    log.info("search endpoint %s is gone (404); trying the next one", path)
+            if node is None:
+                raise SearchUnavailable("error", "Instagram's search endpoints aren't answering; search is off for now")
+        except SearchUnavailable:
+            raise
         except Exception as e:
             raise SearchUnavailable("error", "Instagram refused the search right now" if "429" in str(e)
                                     else f"Search failed: {str(e)[:120]}")
@@ -825,7 +841,7 @@ def search_instagram(q: str) -> list[dict]:
             _probe.on = False
     users = []
     for item in (node.get("users") or [])[:12]:
-        u = item.get("user") or {}
+        u = item.get("user") or item  # {"user": {...}} or a bare user, depending on the endpoint
         name = (u.get("username") or "").lower()
         if not name:
             continue
