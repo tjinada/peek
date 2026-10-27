@@ -5,6 +5,7 @@ Metadata is stored first; files download in a parallel pool afterwards."""
 import json
 import logging
 import random
+import secrets
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -21,7 +22,7 @@ from instaloader.exceptions import (
 from instaloader.nodeiterator import FrozenNodeIterator
 
 from . import db
-from .config import IG_SESSIONID, IG_USER, MAX_POSTS, MEDIA_DIR
+from .config import IG_CSRFTOKEN, IG_SESSIONID, IG_USER, MAX_POSTS, MEDIA_DIR
 
 log = logging.getLogger("peek.fetcher")
 
@@ -53,16 +54,34 @@ def _make_loader() -> instaloader.Instaloader:
         request_timeout=30,
         user_agent=UA,
     )
-    if IG_USER and IG_SESSIONID:
-        L.load_session(IG_USER, {"sessionid": IG_SESSIONID, "ds_user_id": IG_SESSIONID.split("%3A")[0]})
-        log.info("using session for %s", IG_USER)
-    elif IG_USER:
-        try:
+    # A bad session must never stop the app from starting: fall back to logged out.
+    try:
+        if IG_USER and IG_SESSIONID:
+            L.load_session(IG_USER, {
+                "sessionid": IG_SESSIONID,
+                "ds_user_id": IG_SESSIONID.split("%3A")[0],
+                # Instaloader sends this back as the X-CSRFToken header. Instagram only checks
+                # that cookie and header match, so a random one works if none was copied.
+                "csrftoken": IG_CSRFTOKEN or secrets.token_hex(16),
+            })
+            log.info("using session for %s", IG_USER)
+        elif IG_USER:
             L.load_session_from_file(IG_USER)
             log.info("loaded session file for %s", IG_USER)
-        except FileNotFoundError:
-            log.warning("IG_USER set but no session file found; running logged out")
+    except FileNotFoundError:
+        log.warning("IG_USER set but no IG_SESSIONID or session file; running logged out")
+    except Exception as e:
+        log.error("couldn't load the Instagram session (%s); running logged out", e)
+        return _make_loader_plain()
     return L
+
+
+def _make_loader_plain() -> instaloader.Instaloader:
+    return instaloader.Instaloader(
+        download_pictures=False, download_videos=False, download_video_thumbnails=False,
+        save_metadata=False, compress_json=False, quiet=True, max_connection_attempts=2,
+        request_timeout=30, user_agent=UA,
+    )
 
 
 L = _make_loader()

@@ -20,6 +20,7 @@ ACCOUNT_DELAY = (float(os.getenv("PEEK_DELAY_MIN", "20")), float(os.getenv("PEEK
 # Optional burner session — enables stories, private-follow and deeper history.
 IG_USER = os.getenv("IG_USER", "").strip()
 IG_SESSIONID = os.getenv("IG_SESSIONID", "").strip()
+IG_CSRFTOKEN = os.getenv("IG_CSRFTOKEN", "").strip()  # optional; a random one is used if blank
 
 # Optional shared password for the web UI (handy if it's reachable beyond your LAN).
 PEEK_PASSWORD = os.getenv("PEEK_PASSWORD", "")
