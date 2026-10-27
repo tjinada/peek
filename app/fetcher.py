@@ -219,7 +219,7 @@ def _store_post(username: str, post: instaloader.Post, replace: bool = False) ->
     sc = post.shortcode
     if not replace and db.one("SELECT shortcode FROM posts WHERE shortcode=?", (sc,)):
         # refresh counters only; media is immutable
-        db.execute("UPDATE posts SET likes=?, comments=? WHERE shortcode=?", (post.likes, post.comments, sc))
+        db.execute("UPDATE posts SET likes=?, comments=? WHERE shortcode=?", (post.likes, _comments(post), sc))
         return False
 
     items = []
@@ -240,7 +240,7 @@ def _store_post(username: str, post: instaloader.Post, replace: bool = False) ->
                VALUES (?,?,?,?,?,?,?,1)
                ON CONFLICT(shortcode) DO UPDATE SET taken_at=excluded.taken_at, kind=excluded.kind,
                  caption=excluded.caption, likes=excluded.likes, comments=excluded.comments, detailed=1""",
-            (sc, username, post.date_utc.timestamp(), _kind(post), post.caption or "", post.likes, post.comments),
+            (sc, username, post.date_utc.timestamp(), _kind(post), post.caption or "", post.likes, _comments(post)),
         )
     return True
 
@@ -278,10 +278,68 @@ def _store_node(username: str, node: dict, post, wrap) -> None:
     """Store a post from a walk using the cheapest complete-enough source."""
     if post is not None:
         _store_post(username, post)
+    elif "taken_at" in node and ("image_versions2" in node or "carousel_media" in node):
+        _store_iphone(username, node)  # logged-in page data is complete: no extra request
     elif logged_in():
-        _store_post(username, wrap(node))  # logged-in nodes are full; wrapping is free
+        _store_post(username, wrap(node))
     else:
         _store_stub(username, node)
+
+
+def _best(cands: list | None) -> str | None:
+    """Largest image/video version."""
+    cands = [c for c in (cands or []) if c.get("url")]
+    return max(cands, key=lambda c: c.get("width") or 0)["url"] if cands else None
+
+
+def _small(cands: list | None, want: int = 320) -> str | None:
+    """Smallest version at least `want` px wide (or the largest if none is that big)."""
+    cands = [c for c in (cands or []) if c.get("url")]
+    big_enough = [c for c in cands if (c.get("width") or 0) >= want]
+    pool = big_enough or cands
+    if not pool:
+        return None
+    return (min if big_enough else max)(pool, key=lambda c: c.get("width") or 0)["url"]
+
+
+def _store_iphone(username: str, node: dict) -> bool:
+    """Store a post straight from the logged-in timeline's data. Going through Instaloader's
+    Post here costs a hidden extra request per post (its comment count isn't in this data,
+    so it fetches the full post just for that)."""
+    sc = node["code"]
+    if _cached(sc):
+        return False
+    items = node.get("carousel_media") or [node]
+    rows = []
+    for i, m in enumerate(items):
+        imgs = (m.get("image_versions2") or {}).get("candidates")
+        is_video = m.get("media_type") == 2 or bool(m.get("video_versions"))
+        src = _best(m.get("video_versions")) if is_video else _best(imgs)
+        rows.append((sc, i, int(is_video), src, _best(imgs)))
+    mt = node.get("media_type")
+    kind = "carousel" if mt == 8 else ("reel" if node.get("product_type") == "clips" else "video") if mt == 2 else "image"
+    cover = _small((items[0].get("image_versions2") or {}).get("candidates"))
+    with db.conn() as c:
+        c.executemany(
+            "INSERT OR REPLACE INTO media (shortcode, idx, is_video, path, poster, url, poster_url) "
+            "VALUES (?,?,?,NULL,NULL,?,?)", rows)
+        c.execute(
+            """INSERT OR IGNORE INTO posts (shortcode, username, taken_at, kind, caption, likes, comments,
+                                            thumb_url, detailed) VALUES (?,?,?,?,?,?,?,?,1)""",
+            (sc, username, float(node["taken_at"]), kind, (node.get("caption") or {}).get("text") or "",
+             node.get("like_count"), node.get("comment_count"), cover))
+    return True
+
+
+def _comments(post: instaloader.Post):
+    """Comment count without letting Instaloader fetch the whole post to find it."""
+    n = post._node
+    if isinstance(n.get("comments"), int):
+        return n["comments"]
+    for key in ("edge_media_to_comment", "edge_media_to_parent_comment"):
+        if isinstance(n.get(key), dict) and "count" in n[key]:
+            return n[key]["count"]
+    return None
 
 
 def hydrate(sc: str) -> bool:
