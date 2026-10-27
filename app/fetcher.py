@@ -678,14 +678,17 @@ def refresh_profile(username: str, with_stories: bool = True) -> dict:
     Returns once metadata is cached; media keeps downloading in the background."""
     username = username.lower().lstrip("@").strip()
     _check_cooldown()
-    with _lock:
-        _busy.add(username)
-        db.execute("INSERT INTO accounts (username, tried_at) VALUES (?,?) "
-                   "ON CONFLICT(username) DO UPDATE SET tried_at=excluded.tried_at", (username, time.time()))
-        try:
+    # Mark busy *before* taking the lock: while another account holds it this one is
+    # queued, and is_busy() has to say so or /api/u will queue a duplicate task on
+    # every poll.
+    _busy.add(username)
+    try:
+        with _lock:
+            db.execute("INSERT INTO accounts (username, tried_at) VALUES (?,?) "
+                       "ON CONFLICT(username) DO UPDATE SET tried_at=excluded.tried_at", (username, time.time()))
             res = _refresh_locked(username, with_stories)
-        finally:
-            _busy.discard(username)
+    finally:
+        _busy.discard(username)
     res["queued"] = queue_downloads(username)
     return res
 
@@ -813,12 +816,12 @@ def load_older(username: str, count: int = 12) -> dict:
     resuming from the saved position. Raises FetchError."""
     username = username.lower().lstrip("@").strip()
     _check_cooldown()
-    with _lock:
-        _busy.add(username)
-        try:
+    _busy.add(username)
+    try:
+        with _lock:
             res = _load_older_locked(username, count)
-        finally:
-            _busy.discard(username)
+    finally:
+        _busy.discard(username)
     queue_downloads(username)
     return res
 
