@@ -159,7 +159,15 @@ def _posts_out(posts: list[dict]) -> list[dict]:
     return out
 
 
+RETRY_AFTER = 15 * 60  # after a failed fetch, don't auto-retry for this long
+
+
 def _stale(a: dict | None) -> bool:
+    """Should opening this profile kick off a fetch? Not if one was tried recently: a
+    profile that failed (not found, rate limited) would otherwise be re-fetched on every
+    poll. The Refresh button still forces one."""
+    if a and a.get("tried_at") and time.time() - a["tried_at"] < RETRY_AFTER:
+        return False
     return not a or not a.get("fetched_at") or time.time() - a["fetched_at"] > PROFILE_TTL_HOURS * 3600
 
 

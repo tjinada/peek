@@ -355,6 +355,8 @@ def refresh_profile(username: str, with_stories: bool = True) -> dict:
     username = username.lower().lstrip("@").strip()
     with _lock:
         _busy.add(username)
+        db.execute("INSERT INTO accounts (username, tried_at) VALUES (?,?) "
+                   "ON CONFLICT(username) DO UPDATE SET tried_at=excluded.tried_at", (username, time.time()))
         try:
             res = _refresh_locked(username, with_stories)
         finally:

@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     fetched_at   REAL,
     last_error   TEXT,
     cursor       TEXT,             -- frozen Instaloader iterator: where "load older" resumes
-    history_done INTEGER DEFAULT 0 -- reached the account's oldest post
+    history_done INTEGER DEFAULT 0, -- reached the account's oldest post
+    tried_at     REAL              -- last fetch attempt, successful or not
 );
 CREATE TABLE IF NOT EXISTS posts (
     shortcode  TEXT PRIMARY KEY,
@@ -64,7 +65,8 @@ def init():
         # bring databases from earlier versions up to date
         for table, col, decl in (("media", "url", "TEXT"), ("media", "poster_url", "TEXT"),
                                  ("accounts", "cursor", "TEXT"), ("accounts", "history_done", "INTEGER DEFAULT 0"),
-                                 ("posts", "thumb_url", "TEXT"), ("posts", "detailed", "INTEGER DEFAULT 1")):
+                                 ("posts", "thumb_url", "TEXT"), ("posts", "detailed", "INTEGER DEFAULT 1"),
+                                 ("accounts", "tried_at", "REAL")):
             if col not in {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
 
