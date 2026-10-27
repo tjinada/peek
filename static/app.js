@@ -560,6 +560,7 @@ async function profileView(username) {
     a = data.account;
     rememberRecent(a.username);
     view.innerHTML = `<section class="profile-head" id="phead"></section>
+      <div class="strip hl-strip" id="hl" hidden></div>
       <div class="seg" role="tablist">
         <button role="tab" aria-selected="${tab === "posts"}" data-tab="posts">Posts</button>
         <button role="tab" aria-selected="${tab === "reels"}" data-tab="reels">Reels</button>
@@ -569,6 +570,7 @@ async function profileView(username) {
     paintHead();
     paintBody();
     if (a.busy) { const t = setTimeout(poll, 2000); stopPolling = () => clearTimeout(t); }
+    if (!a.is_private && a.fetched_at) loadHighlights(a);
   };
 
   const paintHead = () => {
@@ -684,6 +686,26 @@ async function profileView(username) {
   catch (e) { if (e.message !== "auth") view.innerHTML = empty("Couldn't open that profile", esc(e.message)); }
 }
 
+// Highlights row on a profile (burner session only). Items load when a highlight is opened.
+async function loadHighlights(a) {
+  const box = $("#hl");
+  const r = await api(`/api/u/${encodeURIComponent(a.username)}/highlights`).catch(() => null);
+  if (!box || !r?.highlights.length) return;
+  box.hidden = false;
+  box.innerHTML = r.highlights.map((h) => `<button data-id="${esc(h.id)}" aria-label="Highlight: ${esc(h.title)}">
+      <span class="ring seen"><img src="${esc(h.cover)}" alt="" loading="lazy"></span><span>${esc(h.title)}</span></button>`).join("");
+  $$("button", box).forEach((b, i) => b.addEventListener("click", async () => {
+    b.classList.add("loading-hl");
+    try {
+      const h = r.highlights[i];
+      const { items } = await api(`/api/highlights/${encodeURIComponent(h.id)}`);
+      if (!items.length) return toast("This highlight is empty");
+      openStories(0, [{ username: a.username, avatar: a.avatar, title: h.title, items }], "highlight");
+    } catch (e) { toast(e.message); }
+    finally { b.classList.remove("loading-hl"); }
+  }));
+}
+
 /* ================================================================ post overlay */
 
 async function openPost(shortcode) {
@@ -779,10 +801,12 @@ function closeOverlay() {
 const IMAGE_SECONDS = 5;
 let storyState = null;
 
-function openStories(groupIndex) {
+// kind "stories" marks items seen and repaints the strip; "highlight" does neither.
+function openStories(groupIndex, groups = storyGroups, kind = "stories") {
   overlay.hidden = false;
   document.body.style.overflow = "hidden";
-  storyState = { gi: groupIndex, ii: firstUnseen(storyGroups[groupIndex]), seen: new Set(), raf: 0, paused: false };
+  storyState = { groups, kind, gi: groupIndex, ii: kind === "stories" ? firstUnseen(groups[groupIndex]) : 0,
+    seen: new Set(), raf: 0, paused: false };
   showStory();
   document.addEventListener("keydown", storyKeys);
 }
@@ -793,7 +817,7 @@ function firstUnseen(g) {
 }
 
 function showStory() {
-  const st = storyState, g = storyGroups[st.gi], it = g.items[st.ii];
+  const st = storyState, g = st.groups[st.gi], it = g.items[st.ii];
   cancelAnimationFrame(st.raf);
   st.seen.add(it.id); it.seen = true;
   overlay.innerHTML = `<button class="icon-btn ov-close" aria-label="Close stories">${I.close}</button>
@@ -805,12 +829,14 @@ function showStory() {
         <div class="bars">${g.items.map((_, i) => `<i class="${i < st.ii ? "done" : ""}"><b></b></i>`).join("")}</div>
         <div class="story-who">
           <img class="avatar" src="${esc(g.avatar || AVATAR_FALLBACK)}" alt="">
-          <a href="#/u/${esc(g.username)}">${esc(g.username)}</a><time>${ago(it.taken_at)}</time>
+          <a href="#/u/${esc(g.username)}">${esc(g.username)}</a><time>${g.title ? `${esc(g.title)}, ` : ""}${ago(it.taken_at)}</time>
         </div>
       </div>
       <div class="story-tools">
         ${it.video ? `<button class="icon-btn" id="s-mute" aria-label="Toggle sound">${muted ? I.muted : I.sound}</button>` : ""}
-        <a class="icon-btn" href="${esc(it.src)}" download="${esc(`${g.username}_story_${it.id}.${it.src.split(".").pop()}`)}" aria-label="Download">${I.down}</a>
+        ${st.kind === "highlight"
+          ? `<a class="icon-btn" href="${esc(`${it.src}?dl=${encodeURIComponent(`${g.username}_highlight_${it.id}`)}`)}" download aria-label="Download">${I.down}</a>`
+          : `<a class="icon-btn" href="${esc(it.src)}" download="${esc(`${g.username}_story_${it.id}.${it.src.split(".").pop()}`)}" aria-label="Download">${I.down}</a>`}
       </div>
       <button class="tap prev" aria-label="Previous"></button>
       <button class="tap next" aria-label="Next"></button>
@@ -859,15 +885,15 @@ function showStory() {
 function stepStory(dir) {
   const st = storyState;
   if (!st) return;
-  const g = storyGroups[st.gi];
+  const g = st.groups[st.gi];
   st.ii += dir;
   if (st.ii >= g.items.length) {
     st.gi += 1;
-    if (st.gi >= storyGroups.length) return closeStories();
-    st.ii = firstUnseen(storyGroups[st.gi]);
+    if (st.gi >= st.groups.length) return closeStories();
+    st.ii = st.kind === "stories" ? firstUnseen(st.groups[st.gi]) : 0;
   } else if (st.ii < 0) {
     if (st.gi === 0) { st.ii = 0; }
-    else { st.gi -= 1; st.ii = storyGroups[st.gi].items.length - 1; }
+    else { st.gi -= 1; st.ii = st.groups[st.gi].items.length - 1; }
   }
   showStory();
 }
@@ -883,10 +909,11 @@ function closeStories(repaint = true) {
   if (!st) return;
   cancelAnimationFrame(st.raf);
   document.removeEventListener("keydown", storyKeys);
-  if (st.seen.size) api("/api/stories/seen", { method: "POST", body: { ids: [...st.seen] } }).catch(() => {});
+  const isStories = st.kind === "stories";
+  if (isStories && st.seen.size) api("/api/stories/seen", { method: "POST", body: { ids: [...st.seen] } }).catch(() => {});
   storyState = null;
   hideOverlay();
-  if (repaint) loadStrip();
+  if (repaint && isStories) loadStrip();
 }
 
 /* ================================================================ login */

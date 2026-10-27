@@ -14,8 +14,8 @@ self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== "GET" || url.origin !== location.origin) return;
   if (url.pathname.startsWith("/api/")) return; // straight to network
-  if (url.pathname.startsWith("/media/") || url.pathname.startsWith("/m/")) {
-    if (/\.mp4$/.test(url.pathname)) return; // range requests; let the browser handle video
+  if (url.pathname.startsWith("/media/") || url.pathname.startsWith("/m/") || url.pathname.startsWith("/hl/")) {
+    if (/\.mp4$/.test(url.pathname) || url.pathname.startsWith("/hl/i/")) return; // may be video: range requests
     e.respondWith(caches.open(MEDIA).then(async (c) => {
       const hit = await c.match(e.request);
       if (hit) return hit;

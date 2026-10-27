@@ -114,6 +114,10 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 .new-group input { flex: 1; min-width: 0; font: inherit; font-size: 15px; padding: 8px 14px; border-radius: 99px;
   border: 1px solid var(--line); background: var(--surface); color: var(--text); }
 
+.hl-strip { padding-top: 0; }
+.hl-strip .ring { border-width: 1.5px; }
+.hl-strip button.loading-hl .ring { border-color: var(--safelight); animation: pulse 1s ease-in-out infinite; }
+
 /* ---------------------------------------------------------------- feed cards */
 .card { margin: 0 0 28px; }
 .card-head { display: flex; align-items: center; gap: 10px; padding: 0 16px 10px; }

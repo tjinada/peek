@@ -782,6 +782,116 @@ def _load_older_locked(username: str, count: int) -> dict:
     return {"added": added, "done": done, "note": note, "codes": codes}
 
 
+# ---------------------------------------------------------------- highlights (burner only)
+HIGHLIGHTS_TTL = 24 * 3600
+
+
+def highlights_due(username: str) -> bool:
+    a = db.one("SELECT userid, highlights_at FROM accounts WHERE username=?", (username,))
+    return bool(logged_in() and a and a["userid"] and not cooldown_until()
+                and (not a["highlights_at"] or time.time() - a["highlights_at"] > HIGHLIGHTS_TTL))
+
+
+def refresh_highlights(username: str) -> int:
+    """Fetch an account's highlight list (one request). Items are fetched per highlight
+    when first opened. Raises FetchError."""
+    a = db.one("SELECT userid FROM accounts WHERE username=?", (username,))
+    if not (logged_in() and a and a["userid"]):
+        return 0
+    _check_cooldown()
+    with _lock:
+        try:
+            found = list(L.get_highlights(int(a["userid"])))
+        except Exception as e:
+            raise FetchError(_friendly(e))
+        rows = []
+        for pos, h in enumerate(found):
+            try:
+                cover = h._node.get("cover_media_cropped_thumbnail", {}).get("url") or h.cover_url
+            except Exception:
+                cover = None
+            rows.append((str(h.unique_id), username, h.title, cover, pos))
+        ids = [r[0] for r in rows]
+        with db.conn() as c:
+            c.executemany(
+                """INSERT INTO highlights (id, username, title, cover_url, position) VALUES (?,?,?,?,?)
+                   ON CONFLICT(id) DO UPDATE SET title=excluded.title, cover_url=excluded.cover_url,
+                     position=excluded.position""", rows)
+            gone = c.execute(f"SELECT id FROM highlights WHERE username=? AND id NOT IN ({','.join('?' * len(ids)) or "''"})",
+                             (username, *ids)).fetchall()
+            for (hid,) in gone:
+                c.execute("DELETE FROM highlight_items WHERE highlight_id=?", (hid,))
+                c.execute("DELETE FROM highlights WHERE id=?", (hid,))
+            c.execute("UPDATE accounts SET highlights_at=? WHERE username=?", (time.time(), username))
+    return len(rows)
+
+
+def highlight_items(hid: str) -> list[dict]:
+    """Items of one highlight, fetched on first open and re-checked at most once a day
+    (two requests: the item list and the high-quality versions)."""
+    h = db.one("SELECT h.*, a.userid FROM highlights h JOIN accounts a ON a.username = h.username WHERE h.id=?", (hid,))
+    if not h:
+        return []
+    fresh = h["items_at"] and time.time() - h["items_at"] < HIGHLIGHTS_TTL
+    if not fresh and logged_in():
+        _check_cooldown()
+        with _lock:
+            try:
+                owner = instaloader.Profile(L.context, {"id": h["userid"], "username": h["username"]})
+                hl = instaloader.Highlight(L.context, {"id": hid, "title": h["title"]}, owner)
+                hl._fetch_items()
+                hl._fetch_iphone_struct()
+            except Exception as e:
+                if not db.one("SELECT 1 AS x FROM highlight_items WHERE highlight_id=?", (hid,)):
+                    raise FetchError(_friendly(e))
+                hl = None  # keep showing what we already have
+            if hl is not None:
+                iph = {str(it.get("pk")): it for it in (hl._iphone_struct_ or {}).get("items", [])}
+                rows = []
+                for pos, it in enumerate(hl._items or []):
+                    full = iph.get(str(it["id"]), {})
+                    video = bool(it.get("is_video"))
+                    imgs = (full.get("image_versions2") or {}).get("candidates")
+                    img = _best(imgs) or ((it.get("display_resources") or [{}])[-1].get("src")) or it.get("display_url")
+                    vid = (_best(full.get("video_versions")) or ((it.get("video_resources") or [{}])[-1].get("src"))) if video else None
+                    rows.append((str(it["id"]), hid, pos, it.get("taken_at_timestamp"), int(video), vid or img, img))
+                with db.conn() as c:
+                    c.executemany(
+                        """INSERT INTO highlight_items (id, highlight_id, position, taken_at, is_video, url, poster_url)
+                           VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET position=excluded.position,
+                             url=excluded.url, poster_url=excluded.poster_url""", rows)
+                    c.execute("UPDATE highlights SET items_at=? WHERE id=?", (time.time(), hid))
+    return db.rows("SELECT * FROM highlight_items WHERE highlight_id=? ORDER BY position", (hid,))
+
+
+def ensure_highlight_file(kind: str, key: str) -> str | None:
+    """kind: 'c' cover, 'i' item, 'p' item poster. Downloads on first request and keeps it."""
+    if kind == "c":
+        h = db.one("SELECT username, cover, cover_url FROM highlights WHERE id=?", (key,))
+        if not h:
+            return None
+        if h["cover"] and (MEDIA_DIR / h["cover"]).exists():
+            return h["cover"]
+        rel = _save(h["cover_url"], f"{h['username']}/highlights/cover_{key}.jpg")
+        if rel:
+            db.execute("UPDATE highlights SET cover=? WHERE id=?", (rel, key))
+        return rel
+    it = db.one("SELECT i.*, h.username FROM highlight_items i JOIN highlights h ON h.id = i.highlight_id "
+                "WHERE i.id=?", (key,))
+    if not it:
+        return None
+    col, video = ("poster", False) if kind == "p" else ("path", bool(it["is_video"]))
+    if it[col] and (MEDIA_DIR / it[col]).exists():
+        return it[col]
+    base = f"{it['username']}/highlights/{key}"
+    rel = f"{base}_poster.jpg" if kind == "p" else f"{base}.{'mp4' if video else 'jpg'}"
+    with _file_lock(rel):
+        rel = _save(it["poster_url"] if kind == "p" else it["url"], rel, fix=not video)
+    if rel:
+        db.execute(f"UPDATE highlight_items SET {col}=? WHERE id=?", (rel, key))
+    return rel
+
+
 def _refresh_stories(username: str, userid: int) -> int:
     count = 0
     for story in L.get_stories(userids=[userid]):

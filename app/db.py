@@ -58,6 +58,26 @@ CREATE TABLE IF NOT EXISTS stories (
 CREATE TABLE IF NOT EXISTS seen_stories (id TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value REAL);
 CREATE TABLE IF NOT EXISTS saved (shortcode TEXT PRIMARY KEY, saved_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS highlights (
+    id          TEXT PRIMARY KEY,
+    username    TEXT NOT NULL,
+    title       TEXT,
+    cover_url   TEXT,
+    cover       TEXT,
+    position    INTEGER,
+    items_at    REAL               -- when its items were last fetched
+);
+CREATE TABLE IF NOT EXISTS highlight_items (
+    id           TEXT PRIMARY KEY,
+    highlight_id TEXT NOT NULL,
+    position     INTEGER,
+    taken_at     REAL,
+    is_video     INTEGER NOT NULL,
+    url          TEXT,
+    poster_url   TEXT,
+    path         TEXT,
+    poster       TEXT
+);
 CREATE TABLE IF NOT EXISTS groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL);
 CREATE TABLE IF NOT EXISTS account_groups (
     username TEXT NOT NULL,
@@ -74,7 +94,7 @@ def init():
         for table, col, decl in (("media", "url", "TEXT"), ("media", "poster_url", "TEXT"),
                                  ("accounts", "cursor", "TEXT"), ("accounts", "history_done", "INTEGER DEFAULT 0"),
                                  ("posts", "thumb_url", "TEXT"), ("posts", "detailed", "INTEGER DEFAULT 1"),
-                                 ("accounts", "tried_at", "REAL")):
+                                 ("accounts", "tried_at", "REAL"), ("accounts", "highlights_at", "REAL")):
             if col not in {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
 

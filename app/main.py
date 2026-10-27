@@ -99,7 +99,7 @@ async def auth(request: Request, call_next):
     token = request.cookies.get("peek_auth", "")
     if secrets.compare_digest(token, _token()):
         return await call_next(request)
-    if request.url.path.startswith(("/api/", "/media/", "/m/")):
+    if request.url.path.startswith(("/api/", "/media/", "/m/", "/hl/")):
         return JSONResponse({"detail": "auth"}, status_code=401)
     return await call_next(request)  # the shell loads, then shows the login screen
 
@@ -437,6 +437,42 @@ async def load_older(username: str):
     res["posts"] = _posts_out(db.rows(
         f"SELECT * FROM posts WHERE shortcode IN ({marks}) ORDER BY taken_at DESC", codes)) if codes else []
     return res
+
+
+@app.get("/api/u/{username}/highlights")
+async def highlights(username: str):
+    """Highlight list for a profile. Refreshed from Instagram at most once a day."""
+    u = _clean(username)
+    note = None
+    if fetcher.highlights_due(u) and not fetcher.is_busy(u):
+        try:
+            await asyncio.to_thread(fetcher.refresh_highlights, u)
+        except fetcher.FetchError as e:
+            note = str(e)
+            log.warning("highlights %s failed: %s", u, e)
+    rows = db.rows("SELECT id, title FROM highlights WHERE username=? ORDER BY position", (u,))
+    return {"enabled": fetcher.logged_in(), "note": note,
+            "highlights": [{"id": r["id"], "title": r["title"], "cover": f"/hl/c/{r['id']}"} for r in rows]}
+
+
+@app.get("/api/highlights/{hid}")
+async def highlight(hid: str):
+    try:
+        items = await asyncio.to_thread(fetcher.highlight_items, hid)
+    except fetcher.FetchError as e:
+        raise HTTPException(502, str(e))
+    return {"items": [{"id": i["id"], "video": bool(i["is_video"]), "taken_at": i["taken_at"] or 0,
+                       "src": f"/hl/i/{i['id']}", "poster": f"/hl/p/{i['id']}"} for i in items]}
+
+
+@app.get("/hl/{kind}/{key}")
+async def highlight_file(kind: str, key: str, dl: str | None = None):
+    if kind not in ("c", "i", "p"):
+        raise HTTPException(404)
+    rel = await asyncio.to_thread(fetcher.ensure_highlight_file, kind, key)
+    if not rel:
+        raise HTTPException(404, "Not available")
+    return _media_response(rel, dl)
 
 
 @app.post("/api/u/{username}/refresh")
