@@ -15,6 +15,8 @@ from pydantic import BaseModel
 # Configure logging before importing the fetcher, so its startup messages (session loaded
 # or not) actually show up.
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+# httpx logs every media download with its full (very long) CDN URL; keep only problems.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 from . import db, fetcher  # noqa: E402
 from .config import ACCOUNT_DELAY, MEDIA_DIR, PEEK_PASSWORD, PROFILE_TTL_HOURS, REFRESH_HOURS  # noqa: E402
@@ -49,16 +51,27 @@ async def refresh_cycle():
                 await asyncio.sleep(random.uniform(*ACCOUNT_DELAY))
         await asyncio.to_thread(fetcher.prune_expired_stories)
         state["last_cycle"] = time.time()
+        db.set_meta("last_cycle", state["last_cycle"])
     finally:
         state["cycle_running"] = False
 
 
+def _next_wait() -> float:
+    # ±20% jitter so requests don't land on a fixed rhythm
+    return REFRESH_HOURS * 3600 * random.uniform(0.8, 1.2)
+
+
 async def scheduler():
-    await asyncio.sleep(10)
+    # A restart (e.g. a rebuild) shouldn't trigger a full refresh: carry on from the last one.
+    last = db.get_meta("last_cycle")
+    state["last_cycle"] = last
+    first_wait = max(10.0, last + _next_wait() - time.time()) if last else 10.0
+    state["next_cycle"] = time.time() + first_wait
+    log.info("next background refresh at %s", time.strftime("%H:%M", time.localtime(state["next_cycle"])))
+    await asyncio.sleep(first_wait)
     while True:
         await refresh_cycle()
-        # ±20% jitter so requests don't land on a fixed rhythm
-        wait = REFRESH_HOURS * 3600 * random.uniform(0.8, 1.2)
+        wait = _next_wait()
         state["next_cycle"] = time.time() + wait
         await asyncio.sleep(wait)
 

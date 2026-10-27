@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS stories (
     poster      TEXT
 );
 CREATE TABLE IF NOT EXISTS seen_stories (id TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value REAL);
 """
 
 
@@ -96,3 +97,13 @@ def one(sql, args=()):
 def execute(sql, args=()):
     with conn() as c:
         c.execute(sql, args)
+
+
+def get_meta(key: str) -> float | None:
+    r = one("SELECT value FROM meta WHERE key=?", (key,))
+    return r["value"] if r else None
+
+
+def set_meta(key: str, value: float):
+    execute("INSERT INTO meta (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value))

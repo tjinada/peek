@@ -148,6 +148,12 @@ def _make_loader_plain() -> instaloader.Instaloader:
 
 L = _make_loader()
 
+# Instaloader pauses a random 0-15s (about 1.7s on average) before every Instagram request.
+# Peek already makes one request at a time, spaces out background work, and pauses on 429s,
+# so a short pause is enough and makes lookups and "Load older" much quicker.
+REQUEST_PAUSE = (0.3, 1.0)
+L.context.do_sleep = lambda: time.sleep(random.uniform(*REQUEST_PAUSE))
+
 
 class LookupRefused(Exception):
     pass
