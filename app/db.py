@@ -29,7 +29,9 @@ CREATE TABLE IF NOT EXISTS posts (
     caption    TEXT,
     likes      INTEGER,
     comments   INTEGER,
-    thumb      TEXT
+    thumb      TEXT,
+    thumb_url  TEXT,                   -- small cover from the profile page (logged out)
+    detailed   INTEGER DEFAULT 1       -- 0 = stub from the profile page, details not fetched yet
 );
 CREATE INDEX IF NOT EXISTS posts_user_time ON posts(username, taken_at DESC);
 CREATE INDEX IF NOT EXISTS posts_time ON posts(taken_at DESC);
@@ -61,7 +63,8 @@ def init():
         c.executescript(SCHEMA)
         # bring databases from earlier versions up to date
         for table, col, decl in (("media", "url", "TEXT"), ("media", "poster_url", "TEXT"),
-                                 ("accounts", "cursor", "TEXT"), ("accounts", "history_done", "INTEGER DEFAULT 0")):
+                                 ("accounts", "cursor", "TEXT"), ("accounts", "history_done", "INTEGER DEFAULT 0"),
+                                 ("posts", "thumb_url", "TEXT"), ("posts", "detailed", "INTEGER DEFAULT 1")):
             if col not in {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
 

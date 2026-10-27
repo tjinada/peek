@@ -39,7 +39,7 @@ On a phone, open the page and use "Add to Home Screen" to install it.
 
 | | Logged out | Burner session |
 |---|---|---|
-| Public posts & reels | Yes; each new post costs one extra request | Yes, 12 per request |
+| Public posts & reels | Grid in 1 request per 12 posts; details fill in over time | Full posts, 12 per request |
 | Stories | No | Yes |
 | Risk | Occasional login walls | Burner may get flagged or banned |
 

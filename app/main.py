@@ -2,6 +2,7 @@ import asyncio
 import logging
 import random
 import secrets
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -62,6 +63,7 @@ async def scheduler():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init()
+    threading.Thread(target=fetcher.hydrator_loop, name="peek-hydrator", daemon=True).start()
     task = asyncio.create_task(scheduler())
     yield
     task.cancel()
@@ -148,7 +150,9 @@ def _posts_out(posts: list[dict]) -> list[dict]:
         p = dict(p)
         items = by_code.get(p["shortcode"], [])
         p["media"] = items
-        p["thumb"] = f"/m/{p['shortcode']}/0_thumb.jpg" if items else _media_url(p["thumb"])
+        p["thumb"] = f"/m/{p['shortcode']}/0_thumb.jpg" if items or p.get("thumb_url") else _media_url(p["thumb"])
+        p.pop("thumb_url", None)
+        p["detailed"] = p.get("detailed", 1) == 1
         if "avatar" in p:
             p["avatar"] = _media_url(p["avatar"])
         out.append(p)
@@ -333,13 +337,22 @@ def force_refresh(username: str, bg: BackgroundTasks):
 
 
 @app.get("/api/p/{shortcode}")
-def post(shortcode: str):
+async def post(shortcode: str):
     p = db.one(
         "SELECT p.*, a.avatar, a.full_name FROM posts p LEFT JOIN accounts a ON a.username=p.username WHERE shortcode=?",
         (shortcode,),
     )
     if not p:
         raise HTTPException(404, "Not cached")
+    if p.get("detailed") == 0:
+        # a stub from a logged-out page: fetch its full details now (one request)
+        try:
+            await asyncio.to_thread(fetcher.hydrate, shortcode)
+        except Exception as e:
+            log.warning("hydrate %s on open failed: %s", shortcode, e)
+        p = db.one(
+            "SELECT p.*, a.avatar, a.full_name FROM posts p LEFT JOIN accounts a ON a.username=p.username "
+            "WHERE shortcode=?", (shortcode,))
     return _posts_out([p])[0]
 
 

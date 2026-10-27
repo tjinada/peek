@@ -4,6 +4,7 @@ CDN URLs are signed and expire, so a local copy is the only thing that lasts).
 Metadata is stored first; files download in a parallel pool afterwards."""
 import json
 import logging
+import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -112,12 +113,12 @@ def _kind(post: instaloader.Post) -> str:
     return "image"
 
 
-def _store_post(username: str, post: instaloader.Post) -> bool:
+def _store_post(username: str, post: instaloader.Post, replace: bool = False) -> bool:
     """Cache one post's metadata and its media *source URLs*. No downloading here, so a
     profile's whole grid lands in the DB in one go; files are pulled by the download
     pool (or on demand when the browser asks first). Returns False if already cached."""
     sc = post.shortcode
-    if db.one("SELECT shortcode FROM posts WHERE shortcode=?", (sc,)):
+    if not replace and db.one("SELECT shortcode FROM posts WHERE shortcode=?", (sc,)):
         # refresh counters only; media is immutable
         db.execute("UPDATE posts SET likes=?, comments=? WHERE shortcode=?", (post.likes, post.comments, sc))
         return False
@@ -136,10 +137,91 @@ def _store_post(username: str, post: instaloader.Post) -> bool:
             [(sc, i, int(v), src, poster) for i, v, src, poster in items],
         )
         c.execute(
-            "INSERT OR REPLACE INTO posts VALUES (?,?,?,?,?,?,?,NULL)",
+            """INSERT INTO posts (shortcode, username, taken_at, kind, caption, likes, comments, detailed)
+               VALUES (?,?,?,?,?,?,?,1)
+               ON CONFLICT(shortcode) DO UPDATE SET taken_at=excluded.taken_at, kind=excluded.kind,
+                 caption=excluded.caption, likes=excluded.likes, comments=excluded.comments, detailed=1""",
             (sc, username, post.date_utc.timestamp(), _kind(post), post.caption or "", post.likes, post.comments),
         )
     return True
+
+
+# ---------------------------------------------------------------- stubs (logged out)
+# Logged out, a page of 12 posts arrives with shortcode, type, caption and a 360px cover,
+# but no carousel items, video file, likes or date. Turning each into a full Post costs one
+# request per post, so we store a stub straight away (the grid shows instantly) and the
+# hydrator fills in details in the background, or immediately when a post is opened.
+
+_STUB_KIND = {1: "image", 8: "carousel"}
+IG_EPOCH_MS = 1314220021721  # media IDs carry their creation time in the top bits
+
+
+def _store_stub(username: str, node: dict) -> bool:
+    sc = node["code"]
+    mt = node.get("media_type")
+    kind = _STUB_KIND.get(mt) or ("reel" if node.get("product_type") == "clips" else "video")
+    try:
+        taken = ((int(node["pk"]) >> 23) + IG_EPOCH_MS) / 1000
+    except (KeyError, ValueError, TypeError):
+        taken = time.time()
+    caption = (node.get("caption") or {}).get("text") or ""
+    with db.conn() as c:
+        cur = c.execute(
+            """INSERT OR IGNORE INTO posts (shortcode, username, taken_at, kind, caption, thumb_url, detailed)
+               VALUES (?,?,?,?,?,?,0)""",
+            (sc, username, taken, kind, caption, node.get("display_uri")),
+        )
+    _hydrate_wake.set()
+    return cur.rowcount > 0
+
+
+def _store_node(username: str, node: dict, post, wrap) -> None:
+    """Store a post from a walk using the cheapest complete-enough source."""
+    if post is not None:
+        _store_post(username, post)
+    elif logged_in():
+        _store_post(username, wrap(node))  # logged-in nodes are full; wrapping is free
+    else:
+        _store_stub(username, node)
+
+
+def hydrate(sc: str) -> bool:
+    """Fetch full details for a stub post (one Instagram request). Returns True if done."""
+    row = db.one("SELECT username, detailed FROM posts WHERE shortcode=?", (sc,))
+    if not row or row["detailed"] == 1:
+        return bool(row)
+    with _lock:
+        if db.one("SELECT detailed FROM posts WHERE shortcode=?", (sc,))["detailed"] == 1:
+            return True
+        try:
+            post = instaloader.Post.from_shortcode(L.context, sc)
+        except (QueryReturnedNotFoundException, instaloader.exceptions.BadResponseException):
+            db.execute("UPDATE posts SET detailed=-1 WHERE shortcode=?", (sc,))  # deleted or unavailable
+            return False
+        _store_post(row["username"], post, replace=True)
+    queue_downloads(row["username"], only=sc)
+    return True
+
+
+_hydrate_wake = threading.Event()
+
+
+def hydrator_loop():
+    """Background thread: fill in stubs one at a time, followed accounts and newest first."""
+    while True:
+        row = db.one(
+            """SELECT p.shortcode FROM posts p LEFT JOIN accounts a ON a.username = p.username
+               WHERE p.detailed = 0 ORDER BY COALESCE(a.followed, 0) DESC, p.taken_at DESC LIMIT 1""")
+        if not row:
+            _hydrate_wake.clear()
+            _hydrate_wake.wait(300)
+            continue
+        try:
+            hydrate(row["shortcode"])
+            time.sleep(random.uniform(1.5, 3.5))
+        except Exception as e:
+            log.warning("hydrate %s failed: %s; pausing", row["shortcode"], e)
+            time.sleep(300 if "429" in str(e) or "wait" in str(e).lower() else 60)
 
 
 # ---------------------------------------------------------------- media pool
@@ -192,7 +274,17 @@ THUMB_SIZE = (480, 600)
 
 
 def ensure_thumb(sc: str, idx: int) -> str | None:
-    """A ~50 KB JPEG for grid tiles, made once from the poster/image and kept on disk."""
+    """A small JPEG for grid tiles. Uses the profile page's 360px cover when we have it
+    (one ~20 KB download), otherwise shrinks the poster/image once. Kept on disk."""
+    if idx == 0:
+        row = db.one("SELECT username, thumb_url FROM posts WHERE shortcode=?", (sc,))
+        if row and row["thumb_url"]:
+            rel = f"{row['username']}/{sc}_0_thumb.jpg"
+            if (MEDIA_DIR / rel).exists():
+                return rel
+            with _file_lock(rel):
+                if (MEDIA_DIR / rel).exists() or _save(row["thumb_url"], rel):
+                    return rel
     src = ensure_local(sc, idx, poster=True)
     if not src:
         return None
@@ -215,12 +307,13 @@ def ensure_thumb(sc: str, idx: int) -> str | None:
     return rel
 
 
-def queue_downloads(username: str):
-    """Queue every not-yet-downloaded file for an account: thumbnails first, then the
-    rest of the images, then videos."""
+def queue_downloads(username: str, only: str | None = None):
+    """Queue every not-yet-downloaded file for an account (or just one post): thumbnails
+    first, then the rest of the images, then videos."""
     rows = db.rows(
         "SELECT m.shortcode, m.idx, m.is_video, m.path, m.poster FROM media m "
-        "JOIN posts p ON p.shortcode = m.shortcode WHERE p.username=? ORDER BY p.taken_at DESC", (username,))
+        "JOIN posts p ON p.shortcode = m.shortcode WHERE p.username=? AND (? IS NULL OR p.shortcode=?) "
+        "ORDER BY p.taken_at DESC", (username, only, only))
     first, images, videos = [], [], []
     for r in rows:
         if r["is_video"]:
@@ -230,6 +323,11 @@ def queue_downloads(username: str):
                 videos.append((r["shortcode"], r["idx"], False))
         elif not r["path"]:
             (first if r["idx"] == 0 else images).append((r["shortcode"], r["idx"], False))
+    # stubs have no media rows yet, only a cover: fetch those covers first
+    for r in db.rows("SELECT shortcode FROM posts WHERE username=? AND thumb_url IS NOT NULL "
+                     "AND (? IS NULL OR shortcode=?) ORDER BY taken_at DESC", (username, only, only)):
+        if not (MEDIA_DIR / f"{username}/{r['shortcode']}_0_thumb.jpg").exists():
+            _pool.submit(_safe_thumb, r["shortcode"], 0)
     for sc, idx, poster in first:
         _pool.submit(_safe_thumb, sc, idx)
     for job in images + videos:
@@ -316,7 +414,7 @@ def _refresh_locked(username: str, with_stories: bool) -> dict:
                         break
                     continue
                 cached_run = 0
-                _store_post(username, post or wrap(node))
+                _store_node(username, node, post, wrap)
                 new += 1
                 if new >= MAX_POSTS:
                     break
@@ -425,7 +523,7 @@ def _load_older_locked(username: str, count: int) -> dict:
             code, post = _code(node, wrap)
             if _cached(code):
                 continue
-            _store_post(username, post or wrap(node))
+            _store_node(username, node, post, wrap)
             added += 1
     except (LoginRequiredException, ConnectionException, QueryReturnedNotFoundException) as e:
         note = _friendly(e)
