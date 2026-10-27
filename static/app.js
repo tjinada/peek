@@ -443,11 +443,32 @@ async function profileView(username) {
     return fresh.length;
   };
 
+  // Put posts into the grid at their date position. New "older" posts can still be newer
+  // than the bottom tile (e.g. an old pinned post), so appending isn't enough.
+  const insertSorted = (posts) => {
+    posts = posts.filter((p) => !shown.has(p.shortcode));
+    if (!posts.length) return;
+    if (!$("#grid")) {
+      $("#pbody").querySelector(".empty")?.remove();
+      $("#grid-foot").insertAdjacentHTML("beforebegin", `<div class="grid" id="grid"></div>`);
+    }
+    const grid = $("#grid");
+    for (const p of posts) {
+      shown.add(p.shortcode);
+      let i = data.posts.findIndex((q) => q.taken_at < p.taken_at);
+      if (i < 0) i = data.posts.length;
+      data.posts.splice(i, 0, p);
+      const tmp = document.createElement("div");
+      tmp.innerHTML = gridHTML([p]);
+      grid.insertBefore(tmp.firstElementChild, grid.children[i] || null);
+    }
+  };
+
   const wireGridFoot = () => {
     const foot = $("#grid-foot");
     if (!foot) return;
-    const saved = a.post_count ? `${num(a.cached)} of ${num(a.post_count)} posts saved` : `${num(a.cached)} posts saved`;
     const showButton = (msg = "") => {
+      const saved = a.post_count ? `${num(a.cached)} of ${num(a.post_count)} posts saved` : `${num(a.cached)} posts saved`;
       if (a.is_private) { foot.innerHTML = ""; return; }
       if (a.history_done) {
         foot.innerHTML = `<p>That's every post from @${esc(a.username)}. ${num(a.cached)} saved.</p>`;
@@ -463,7 +484,7 @@ async function profileView(username) {
       try {
         const r = await api(`/api/u/${encodeURIComponent(a.username)}/older`, { method: "POST" });
         a.cached = r.cached; a.history_done = r.done;
-        while ((await appendPage()) && data.next);   // show everything that just landed
+        insertSorted(r.posts.filter((p) => tab !== "reels" || p.kind === "reel" || p.kind === "video"));
         showButton(r.note || (r.added || r.done ? "" : "Instagram didn't return any more posts this time."));
       } catch (e) {
         showButton(e.message);

@@ -325,6 +325,12 @@ async def load_older(username: str):
     except fetcher.FetchError as e:
         raise HTTPException(502, str(e))
     res["cached"] = db.one("SELECT COUNT(*) AS n FROM posts WHERE username=?", (u,))["n"]
+    # Hand back the new posts themselves: they aren't always older than what's on screen
+    # (pinned posts sit among the newest yet can be years old), so paging by date misses them.
+    codes = res.pop("codes", [])
+    marks = ",".join("?" * len(codes))
+    res["posts"] = _posts_out(db.rows(
+        f"SELECT * FROM posts WHERE shortcode IN ({marks}) ORDER BY taken_at DESC", codes)) if codes else []
     return res
 
 

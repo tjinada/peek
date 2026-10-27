@@ -492,7 +492,7 @@ def load_older(username: str, count: int = 12) -> dict:
 def _load_older_locked(username: str, count: int) -> dict:
     acct = db.one("SELECT cursor, history_done FROM accounts WHERE username=?", (username,))
     if acct and acct["history_done"]:
-        return {"added": 0, "done": True, "note": None}
+        return {"added": 0, "done": True, "note": None, "codes": []}
     try:
         p = instaloader.Profile.from_username(L.context, username)
     except ProfileNotExistsException:
@@ -512,7 +512,7 @@ def _load_older_locked(username: str, count: int) -> dict:
             log.info("%s: saved position unusable (%s); walking from the newest post", username, e)
             it, wrap = _walk(p)
 
-    added, done, note = 0, False, None
+    added, done, note, codes = 0, False, None, []
     try:
         while added < count:
             try:
@@ -524,12 +524,13 @@ def _load_older_locked(username: str, count: int) -> dict:
             if _cached(code):
                 continue
             _store_node(username, node, post, wrap)
+            codes.append(code)
             added += 1
     except (LoginRequiredException, ConnectionException, QueryReturnedNotFoundException) as e:
         note = _friendly(e)
         log.info("%s: load older stopped: %s", username, note)
     _save_cursor(username, it, done)
-    return {"added": added, "done": done, "note": note}
+    return {"added": added, "done": done, "note": note, "codes": codes}
 
 
 def _refresh_stories(username: str, userid: int) -> int:
