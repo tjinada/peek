@@ -22,6 +22,14 @@ IG_USER = os.getenv("IG_USER", "").strip()
 IG_SESSIONID = os.getenv("IG_SESSIONID", "").strip()
 IG_CSRFTOKEN = os.getenv("IG_CSRFTOKEN", "").strip()  # optional; a random one is used if blank
 
+# Optional device cookies, copied from the same browser session as IG_SESSIONID.
+# Instaloader maps these onto the app-style headers (mid -> x-mid, ig_did ->
+# x-ig-device-id, rur -> ig-u-rur); without them app-side requests look device-less
+# and Instagram refuses them more often.
+IG_MID = os.getenv("IG_MID", "").strip()
+IG_DID = os.getenv("IG_DID", "").strip()
+IG_RUR = os.getenv("IG_RUR", "").strip()
+
 # Optional shared password for the web UI (handy if it's reachable beyond your LAN).
 PEEK_PASSWORD = os.getenv("PEEK_PASSWORD", "")
 

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import logging
 import random
+import re
 import secrets
 import threading
 import time
@@ -15,6 +16,7 @@ import httpx
 import instaloader
 from PIL import Image
 from instaloader.exceptions import (
+    BadResponseException,
     ConnectionException,
     LoginRequiredException,
     ProfileNotExistsException,
@@ -24,7 +26,9 @@ from instaloader.exceptions import (
 from instaloader.nodeiterator import FrozenNodeIterator
 
 from . import db
-from .config import IG_CSRFTOKEN, IG_SESSIONID, IG_USER, MAX_POSTS, MEDIA_DIR
+from .config import (
+    IG_CSRFTOKEN, IG_DID, IG_MID, IG_RUR, IG_SESSIONID, IG_USER, MAX_POSTS, MEDIA_DIR,
+)
 
 log = logging.getLogger("peek.fetcher")
 
@@ -119,13 +123,20 @@ def _make_loader() -> instaloader.Instaloader:
     # A bad session must never stop the app from starting: fall back to logged out.
     try:
         if IG_USER and IG_SESSIONID:
-            L.load_session(IG_USER, {
+            cookies = {
                 "sessionid": IG_SESSIONID,
                 "ds_user_id": IG_SESSIONID.split("%3A")[0],
                 # Instaloader sends this back as the X-CSRFToken header. Instagram only checks
                 # that cookie and header match, so a random one works if none was copied.
                 "csrftoken": IG_CSRFTOKEN or secrets.token_hex(16),
-            })
+            }
+            # Device cookies, if they were copied: Instaloader turns these into the app-style
+            # headers (x-mid, x-ig-device-id, ig-u-rur). Without them, app-side requests look
+            # device-less and Instagram refuses them more often.
+            for name, value in (("mid", IG_MID), ("ig_did", IG_DID), ("rur", IG_RUR)):
+                if value:
+                    cookies[name] = value
+            L.load_session(IG_USER, cookies)
             log.info("using session for %s", IG_USER)
         elif IG_USER:
             L.load_session_from_file(IG_USER)
@@ -159,39 +170,114 @@ class LookupRefused(Exception):
     pass
 
 
-def _get_profile(username: str) -> instaloader.Profile:
-    """Instaloader looks a profile up via its public web page, which shows what a logged-out
-    visitor sees. Age- and region-restricted profiles aren't on that page at all, so with a
-    burner session we look them up the way the Instagram app does, as that session."""
+# ---------------------------------------------------------------- restricted profiles
+# Instaloader resolves a username from the *logged-out* render of the profile page (its
+# get_page_data() throws away the session and uses a fresh anonymous one), and Instagram
+# hides age- and region-restricted profiles from logged-out visitors. So Profile.from_username()
+# reports those profiles as not existing even when the burner can see them fine
+# (instaloader issue #2770). The page fetched WITH the session still names the profile's
+# numeric id in its logging blob, so we read that and load the profile by id through the
+# logged-in GraphQL profile query — which is what the app does.
+
+_PAGE_PROFILE_ID = re.compile(
+    r'"page_logging":\{"name":"profilePage","params":\{[^}]*?"profile_id":"(\d+)"'
+)
+_PAGE_PROFILE_ID_LOOSE = re.compile(r'"profile_id":"(\d+)"')
+
+
+def _page_profile_id(username: str) -> int | None:
+    """The profile's numeric id, read from the profile page as *the session* sees it."""
     try:
-        return instaloader.Profile.from_username(L.context, username)
-    except ProfileNotExistsException:
-        if not logged_in():
-            raise
-    log.info("%s: not on the public page; looking it up as the burner via the app API", username)
-    refused = []
+        html = L.context._get_page(L.context._session, f"{username.lower()}/")
+    except QueryReturnedNotFoundException:
+        return None
+    except Exception as e:
+        log.warning("%s: session page fetch failed: %s", username, e)
+        return None
+    m = _PAGE_PROFILE_ID.search(html) or _PAGE_PROFILE_ID_LOOSE.search(html)
+    return int(m.group(1)) if m else None
+
+
+def _profile_by_id(userid: int) -> instaloader.Profile | None:
+    """Load a profile by its numeric id with the logged-in GraphQL profile query.
+    (api/v1/users/<id>/info/ is answered with 429 for logged-in sessions, so avoid it.)"""
+    p = instaloader.Profile(L.context, {"id": int(userid), "username": ""})
+    p._obtain_metadata()  # doc_id 27937681195819736; also fills in the real username
+    return p if p.username else None
+
+
+def _profile_from_web_profile_info(username: str) -> instaloader.Profile | None:
+    """Last resort: the web_profile_info endpoint. Instagram refuses it with 400 for some
+    professional profiles and 401/429 for some sessions, so it can't be the only path."""
+    refused = False
     _probe.on = True
     try:
         for name, fetch in (
-            ("app API", lambda: L.context.get_iphone_json("api/v1/users/web_profile_info/", {"username": username})),
-            ("web API", lambda: L.context.get_json("api/v1/users/web_profile_info/", params={"username": username})),
+            ("web API", lambda: L.context.get_json("api/v1/users/web_profile_info/", {"username": username})),
+            ("app host", lambda: L.context.get_iphone_json("api/v1/users/web_profile_info/", {"username": username})),
         ):
             try:
                 data = fetch()
-            except Exception as e:
-                why = "refused (429)" if "429" in str(e) else str(e)[:120]
-                log.warning("%s: %s lookup %s", username, name, why)
-                refused.append(name)
+            except TooManyRequestsException:
+                log.warning("%s: %s lookup refused (429)", username, name)
+                refused = True
                 continue
-            user = (data.get("data") or {}).get("user") if isinstance(data, dict) else None
-            if user:
+            except Exception as e:
+                log.warning("%s: %s lookup failed: %s", username, name, str(e)[:120])
+                refused = True
+                continue
+            user = (data.get("data") or {}).get("user") or data.get("user")  # both shapes
+            if user and (user.get("id") or user.get("pk")):
                 log.info("%s: found via the %s", username, name)
-                p = instaloader.Profile(L.context, user)
+                p = instaloader.Profile(L.context, dict(user, id=user.get("id") or user.get("pk")))
                 p._has_full_metadata = True  # this response is the full profile
                 return p
             log.warning("%s: %s returned no profile", username, name)
     finally:
         _probe.on = False
+    if refused:
+        raise LookupRefused("Instagram wouldn't return this profile to the burner's session right now")
+    return None
+
+
+def _get_profile(username: str) -> instaloader.Profile:
+    """Resolve a username to a Profile. Raises ProfileNotExistsException or LookupRefused."""
+    username = username.lower()
+    try:
+        return instaloader.Profile.from_username(L.context, username)
+    except ProfileNotExistsException:
+        if not logged_in():
+            raise
+    except (BadResponseException, ConnectionException):
+        if not logged_in():
+            raise
+
+    log.info("%s: not on the logged-out page; resolving it as the burner", username)
+
+    refused = False
+
+    userid = _page_profile_id(username)
+    if userid:
+        try:
+            p = _profile_by_id(userid)
+            if p and p.username.lower() == username:
+                log.info("%s: resolved via the session page (id %s)", username, userid)
+                return p
+        except ProfileNotExistsException:
+            pass
+        except TooManyRequestsException:
+            refused = True
+        except Exception as e:
+            log.warning("%s: profile query failed: %s", username, e)
+            refused = True
+
+    try:
+        p = _profile_from_web_profile_info(username)
+        if p:
+            return p
+    except LookupRefused:
+        refused = True
+
     if refused:
         raise LookupRefused("Instagram wouldn't return this profile to the burner's session right now")
     raise ProfileNotExistsException(f"Profile {username} does not exist.")
@@ -423,7 +509,7 @@ def hydrate(sc: str) -> bool:
             return True
         try:
             post = instaloader.Post.from_shortcode(L.context, sc)
-        except (QueryReturnedNotFoundException, instaloader.exceptions.BadResponseException):
+        except (QueryReturnedNotFoundException, BadResponseException):
             db.execute("UPDATE posts SET detailed=-1 WHERE shortcode=?", (sc,))  # deleted or unavailable
             return False
         _store_post(row["username"], post, replace=True)
@@ -615,7 +701,7 @@ def _refresh_locked(username: str, with_stories: bool) -> dict:
     except LookupRefused as e:
         _record_error(username, str(e))
         raise FetchError(str(e))
-    except (LoginRequiredException, ConnectionException) as e:
+    except (LoginRequiredException, ConnectionException, BadResponseException) as e:
         msg = _friendly(e)
         _record_error(username, msg)
         raise FetchError(msg)
@@ -664,7 +750,8 @@ def _refresh_locked(username: str, with_stories: bool) -> dict:
                 new += 1
                 if new >= MAX_POSTS:
                     break
-        except (LoginRequiredException, ConnectionException, QueryReturnedNotFoundException) as e:
+        except (LoginRequiredException, ConnectionException, QueryReturnedNotFoundException,
+                BadResponseException) as e:
             # Logged out, pagination sometimes hits a login wall. What we got is still good.
             note = _friendly(e)
             log.info("%s: stopped early: %s", username, note)
@@ -746,7 +833,7 @@ def _load_older_locked(username: str, count: int) -> dict:
         raise FetchError("Not found, or restricted and hidden from this session")
     except LookupRefused as e:
         raise FetchError(str(e))
-    except (LoginRequiredException, ConnectionException) as e:
+    except (LoginRequiredException, ConnectionException, BadResponseException) as e:
         raise FetchError(_friendly(e))
     if p.is_private and not p.followed_by_viewer:
         raise FetchError("This account is private")
@@ -775,7 +862,8 @@ def _load_older_locked(username: str, count: int) -> dict:
             _store_node(username, node, post, wrap)
             codes.append(code)
             added += 1
-    except (LoginRequiredException, ConnectionException, QueryReturnedNotFoundException) as e:
+    except (LoginRequiredException, ConnectionException, QueryReturnedNotFoundException,
+            BadResponseException) as e:
         note = _friendly(e)
         log.info("%s: load older stopped: %s", username, note)
     _save_cursor(username, it, done)
@@ -1100,4 +1188,3 @@ def keep_post(sc: str, only: int | None = None):
 
 def media_exists(rel: str | None) -> bool:
     return bool(rel) and (MEDIA_DIR / rel).exists()
-
