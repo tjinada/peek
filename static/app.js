@@ -125,13 +125,35 @@ function actionsHTML(p) {
     <span title="Likes">${I.heart}${num(p.likes)}</span>
     <span title="Comments">${I.chat}${num(p.comments)}</span>
     <span class="spacer"></span>
-    ${first ? `<a href="${esc(first.src)}" download title="Download">${I.down}</a>` : ""}
+    ${first ? `<a class="dl" href="${esc(first.src)}" download="${esc(dlName(p, 0))}" title="Download this photo or video" aria-label="Download">${I.down}</a>` : ""}
     <a href="https://www.instagram.com/p/${esc(p.shortcode)}/" target="_blank" rel="noopener noreferrer" title="Open on Instagram">${I.out}</a>
   </div>`;
 }
 
+// e.g. marisol.frames_C0aB12xYz_2.jpg, so carousel slides don't overwrite each other
+function dlName(p, i) {
+  const m = p.media[i] || p.media[0];
+  return `${p.username}_${p.shortcode}${p.media.length > 1 ? `_${i + 1}` : ""}.${m?.video ? "mp4" : "jpg"}`;
+}
+
+// Point the download link at whichever carousel slide is showing, right before the click goes through.
+function wireDownloads(root, posts) {
+  $$("a.dl", root).forEach((a) => a.addEventListener("click", () => {
+    const holder = a.closest(".card, .post-view");
+    const p = posts[holder?.dataset.sc];
+    if (!p) return;
+    const slides = $(".slides", holder);
+    const i = slides ? Math.round(slides.scrollLeft / Math.max(1, slides.clientWidth)) : 0;
+    const m = p.media[i] || p.media[0];
+    a.href = m.src;
+    a.download = dlName(p, i);
+  }));
+}
+const postIndex = {};
+
 function cardHTML(p) {
-  return `<article class="card">
+  postIndex[p.shortcode] = p;
+  return `<article class="card" data-sc="${esc(p.shortcode)}">
     <div class="card-head">
       <a href="#/u/${esc(p.username)}"><img class="avatar" src="${esc(p.avatar || AVATAR_FALLBACK)}" alt="" loading="lazy"></a>
       <div class="who"><a href="#/u/${esc(p.username)}">${esc(p.username)}</a><time>${ago(p.taken_at)}</time></div>
@@ -145,7 +167,7 @@ function cardHTML(p) {
 }
 
 function wireCards(root) {
-  wireVideos(root); wireSlides(root);
+  wireVideos(root); wireSlides(root); wireDownloads(root, postIndex);
   $$(".caption.clamp", root).forEach((c) => c.addEventListener("click", () => c.classList.remove("clamp"), { once: true }));
 }
 
@@ -329,7 +351,7 @@ async function profileView(username) {
     data = await api(`/api/u/${encodeURIComponent(username)}${tab === "reels" ? "?kind=reels" : ""}`);
     paint();
     if (data.account.busy) {
-      const t = setTimeout(load, 3000);
+      const t = setTimeout(load, 1500);
       stopPolling = () => clearTimeout(t);
     }
   };
@@ -387,8 +409,9 @@ async function openPost(shortcode) {
   $(".ov-close", overlay).addEventListener("click", closeOverlay);
   try {
     const p = await api(`/api/p/${encodeURIComponent(shortcode)}`);
+    postIndex[p.shortcode] = p;
     overlay.innerHTML = `<button class="icon-btn ov-close" aria-label="Close">${I.close}</button>
-      <div class="post-view">
+      <div class="post-view" data-sc="${esc(p.shortcode)}">
         ${frameHTML(p)}
         <aside>
           <div class="card-head">
@@ -459,7 +482,7 @@ function showStory() {
       </div>
       <div class="story-tools">
         ${it.video ? `<button class="icon-btn" id="s-mute" aria-label="Toggle sound">${muted ? I.muted : I.sound}</button>` : ""}
-        <a class="icon-btn" href="${esc(it.src)}" download aria-label="Download">${I.down}</a>
+        <a class="icon-btn" href="${esc(it.src)}" download="${esc(`${g.username}_story_${it.id}.${it.video ? "mp4" : "jpg"}`)}" aria-label="Download">${I.down}</a>
       </div>
       <button class="tap prev" aria-label="Previous"></button>
       <button class="tap next" aria-label="Next"></button>

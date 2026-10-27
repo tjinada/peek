@@ -35,8 +35,10 @@ CREATE TABLE IF NOT EXISTS media (
     shortcode  TEXT NOT NULL,
     idx        INTEGER NOT NULL,
     is_video   INTEGER NOT NULL,
-    path       TEXT,
+    path       TEXT,               -- local file, NULL until downloaded
     poster     TEXT,
+    url        TEXT,               -- Instagram CDN source (expires after a few days)
+    poster_url TEXT,
     PRIMARY KEY (shortcode, idx)
 );
 CREATE TABLE IF NOT EXISTS stories (
@@ -55,6 +57,11 @@ CREATE TABLE IF NOT EXISTS seen_stories (id TEXT PRIMARY KEY);
 def init():
     with conn() as c:
         c.executescript(SCHEMA)
+        # migrate databases created before media was downloaded lazily
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(media)")}
+        for col in ("url", "poster_url"):
+            if col not in cols:
+                c.execute(f"ALTER TABLE media ADD COLUMN {col} TEXT")
 
 
 @contextmanager

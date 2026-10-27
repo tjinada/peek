@@ -81,7 +81,7 @@ async def auth(request: Request, call_next):
     token = request.cookies.get("peek_auth", "")
     if secrets.compare_digest(token, _token()):
         return await call_next(request)
-    if request.url.path.startswith(("/api/", "/media/")):
+    if request.url.path.startswith(("/api/", "/media/", "/m/")):
         return JSONResponse({"detail": "auth"}, status_code=401)
     return await call_next(request)  # the shell loads, then shows the login screen
 
@@ -121,22 +121,32 @@ def _account_out(a: dict) -> dict:
     return a
 
 
+def _m(sc: str, idx: int, video: bool, poster: bool) -> str:
+    """Media is served through /m/, which downloads on demand if the pool hasn't got
+    to that file yet. The extension is there for the service worker and for downloads."""
+    if poster:
+        return f"/m/{sc}/{idx}_poster.jpg"
+    return f"/m/{sc}/{idx}.{'mp4' if video else 'jpg'}"
+
+
 def _posts_out(posts: list[dict]) -> list[dict]:
     if not posts:
         return []
     codes = [p["shortcode"] for p in posts]
     marks = ",".join("?" * len(codes))
-    media = db.rows(f"SELECT * FROM media WHERE shortcode IN ({marks}) ORDER BY shortcode, idx", codes)
+    media = db.rows(f"SELECT shortcode, idx, is_video FROM media WHERE shortcode IN ({marks}) ORDER BY shortcode, idx", codes)
     by_code: dict[str, list] = {}
     for m in media:
+        v = bool(m["is_video"])
         by_code.setdefault(m["shortcode"], []).append(
-            {"video": bool(m["is_video"]), "src": _media_url(m["path"]), "poster": _media_url(m["poster"])}
+            {"video": v, "src": _m(m["shortcode"], m["idx"], v, False), "poster": _m(m["shortcode"], m["idx"], v, v)}
         )
     out = []
     for p in posts:
         p = dict(p)
-        p["thumb"] = _media_url(p["thumb"])
-        p["media"] = by_code.get(p["shortcode"], [])
+        items = by_code.get(p["shortcode"], [])
+        p["media"] = items
+        p["thumb"] = items[0]["poster"] if items else _media_url(p["thumb"])
         if "avatar" in p:
             p["avatar"] = _media_url(p["avatar"])
         out.append(p)
@@ -325,6 +335,20 @@ async def refresh_all():
 
 
 # ---------------------------------------------------------------- static
+
+
+@app.get("/m/{shortcode}/{name}")
+async def media_file(shortcode: str, name: str):
+    stem = name.rsplit(".", 1)[0]
+    poster = stem.endswith("_poster")
+    try:
+        idx = int(stem.removesuffix("_poster"))
+    except ValueError:
+        raise HTTPException(404)
+    rel = await asyncio.to_thread(fetcher.ensure_local, shortcode, idx, poster)
+    if not rel:
+        raise HTTPException(404, "Media unavailable (Instagram link may have expired; refresh the profile)")
+    return FileResponse(MEDIA_DIR / rel, headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
 app.mount("/media", StaticFiles(directory=MEDIA_DIR), name="media")

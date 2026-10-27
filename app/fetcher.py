@@ -1,10 +1,12 @@
 """Everything that talks to Instagram lives here. Instaloader does the protocol work;
 this module maps its objects into the cache and downloads media to disk (Instagram's
-CDN URLs are signed and expire, so a local copy is the only thing that lasts)."""
+CDN URLs are signed and expire, so a local copy is the only thing that lasts).
+Metadata is stored first; files download in a parallel pool afterwards."""
 import itertools
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import instaloader
@@ -109,15 +111,15 @@ def _kind(post: instaloader.Post) -> str:
 
 
 def _store_post(username: str, post: instaloader.Post) -> bool:
-    """Cache one post and its media. Returns False if it was already cached."""
+    """Cache one post's metadata and its media *source URLs*. No downloading here, so a
+    profile's whole grid lands in the DB in one go; files are pulled by the download
+    pool (or on demand when the browser asks first). Returns False if already cached."""
     sc = post.shortcode
-    existing = db.one("SELECT shortcode FROM posts WHERE shortcode=?", (sc,))
-    if existing:
+    if db.one("SELECT shortcode FROM posts WHERE shortcode=?", (sc,)):
         # refresh counters only; media is immutable
         db.execute("UPDATE posts SET likes=?, comments=? WHERE shortcode=?", (post.likes, post.comments, sc))
         return False
 
-    base = f"{username}/{sc}"
     items = []
     if post.typename == "GraphSidecar":
         for i, node in enumerate(post.get_sidecar_nodes()):
@@ -125,31 +127,104 @@ def _store_post(username: str, post: instaloader.Post) -> bool:
     else:
         items.append((0, post.is_video, post.video_url if post.is_video else post.url, post.url))
 
-    media_rows = []
-    for i, is_video, src, poster_src in items:
-        path = _save(src, f"{base}_{i}.{'mp4' if is_video else 'jpg'}")
-        poster = _save(poster_src, f"{base}_{i}_poster.jpg") if is_video else path
-        media_rows.append((sc, i, int(is_video), path, poster))
-
-    thumb = media_rows[0][4] if media_rows else None
     with db.conn() as c:
-        c.executemany("INSERT OR REPLACE INTO media VALUES (?,?,?,?,?)", media_rows)
+        c.executemany(
+            "INSERT OR REPLACE INTO media (shortcode, idx, is_video, path, poster, url, poster_url) "
+            "VALUES (?,?,?,NULL,NULL,?,?)",
+            [(sc, i, int(v), src, poster) for i, v, src, poster in items],
+        )
         c.execute(
-            "INSERT OR REPLACE INTO posts VALUES (?,?,?,?,?,?,?,?)",
-            (sc, username, post.date_utc.timestamp(), _kind(post), post.caption or "", post.likes, post.comments, thumb),
+            "INSERT OR REPLACE INTO posts VALUES (?,?,?,?,?,?,?,NULL)",
+            (sc, username, post.date_utc.timestamp(), _kind(post), post.caption or "", post.likes, post.comments),
         )
     return True
 
 
+# ---------------------------------------------------------------- media pool
+# Downloads hit Instagram's CDN, not its API, so they can run in parallel and outside
+# the Instaloader lock. Posters/images are queued before videos so grids fill first.
+
+_pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="peek-dl")
+_file_locks: dict[str, threading.Lock] = {}
+_file_locks_guard = threading.Lock()
+
+
+def _file_lock(key: str) -> threading.Lock:
+    with _file_locks_guard:
+        return _file_locks.setdefault(key, threading.Lock())
+
+
+def media_rel(username: str, sc: str, idx: int, is_video: bool, poster: bool) -> str:
+    if poster and is_video:
+        return f"{username}/{sc}_{idx}_poster.jpg"
+    return f"{username}/{sc}_{idx}.{'mp4' if is_video else 'jpg'}"
+
+
+def ensure_local(sc: str, idx: int, poster: bool) -> str | None:
+    """Return the local path for one media file, downloading it now if needed.
+    Safe to call from the pool and from request handlers at the same time."""
+    row = db.one(
+        "SELECT m.*, p.username FROM media m JOIN posts p ON p.shortcode = m.shortcode "
+        "WHERE m.shortcode=? AND m.idx=?", (sc, idx))
+    if not row:
+        return None
+    video = bool(row["is_video"])
+    col = "poster" if (poster and video) else "path"
+    if row[col] and (MEDIA_DIR / row[col]).exists():
+        return row[col]
+    rel = media_rel(row["username"], sc, idx, video, poster)
+    with _file_lock(rel):
+        if not (MEDIA_DIR / rel).exists():
+            if not _save(row["poster_url"] if col == "poster" else row["url"], rel):
+                return None
+        if video:
+            db.execute(f"UPDATE media SET {col}=? WHERE shortcode=? AND idx=?", (rel, sc, idx))
+        else:  # an image is its own poster
+            db.execute("UPDATE media SET path=?, poster=? WHERE shortcode=? AND idx=?", (rel, rel, sc, idx))
+    if idx == 0 and (poster or not video):
+        db.execute("UPDATE posts SET thumb=? WHERE shortcode=?", (rel, sc))
+    return rel
+
+
+def queue_downloads(username: str):
+    """Queue every not-yet-downloaded file for an account: thumbnails first, then the
+    rest of the images, then videos."""
+    rows = db.rows(
+        "SELECT m.shortcode, m.idx, m.is_video, m.path, m.poster FROM media m "
+        "JOIN posts p ON p.shortcode = m.shortcode WHERE p.username=? ORDER BY p.taken_at DESC", (username,))
+    first, images, videos = [], [], []
+    for r in rows:
+        if r["is_video"]:
+            if not r["poster"]:
+                first.append((r["shortcode"], r["idx"], True))
+            if not r["path"]:
+                videos.append((r["shortcode"], r["idx"], False))
+        elif not r["path"]:
+            (first if r["idx"] == 0 else images).append((r["shortcode"], r["idx"], False))
+    for job in first + images + videos:
+        _pool.submit(_safe_ensure, *job)
+    return len(first) + len(images) + len(videos)
+
+
+def _safe_ensure(sc, idx, poster):
+    try:
+        ensure_local(sc, idx, poster)
+    except Exception as e:
+        log.warning("download job %s/%s failed: %s", sc, idx, e)
+
+
 def refresh_profile(username: str, with_stories: bool = True) -> dict:
-    """Fetch profile + recent posts (+ stories when logged in). Raises FetchError."""
+    """Fetch profile + recent posts (+ stories when logged in). Raises FetchError.
+    Returns once metadata is cached; media keeps downloading in the background."""
     username = username.lower().lstrip("@").strip()
     with _lock:
         _busy.add(username)
         try:
-            return _refresh_locked(username, with_stories)
+            res = _refresh_locked(username, with_stories)
         finally:
             _busy.discard(username)
+    res["queued"] = queue_downloads(username)
+    return res
 
 
 def _refresh_locked(username: str, with_stories: bool) -> dict:

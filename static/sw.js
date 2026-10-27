@@ -1,6 +1,6 @@
 // App shell is cached so the PWA opens instantly; API is always network-first;
 // saved media never changes, so it's cache-first.
-const SHELL = "peek-shell-v1";
+const SHELL = "peek-shell-v2";
 const MEDIA = "peek-media-v1";
 const SHELL_FILES = ["/", "/index.html", "/app.css", "/app.js", "/manifest.webmanifest", "/icons/icon-192.png"];
 
@@ -14,7 +14,7 @@ self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== "GET" || url.origin !== location.origin) return;
   if (url.pathname.startsWith("/api/")) return; // straight to network
-  if (url.pathname.startsWith("/media/")) {
+  if (url.pathname.startsWith("/media/") || url.pathname.startsWith("/m/")) {
     if (/\.mp4$/.test(url.pathname)) return; // range requests; let the browser handle video
     e.respondWith(caches.open(MEDIA).then(async (c) => {
       const hit = await c.match(e.request);
