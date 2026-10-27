@@ -68,7 +68,7 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
   border-top: 1px solid var(--line);
 }
 .tabs a {
-  flex: 0 1 110px; display: flex; flex-direction: column; align-items: center; gap: 2px;
+  flex: 0 1 96px; display: flex; flex-direction: column; align-items: center; gap: 2px;
   text-decoration: none; color: var(--muted); font-size: 11.5px; font-weight: 500; border-radius: 12px; padding-top: 4px;
 }
 .tabs a[aria-current="page"] { color: var(--text); }
@@ -126,6 +126,9 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 .actions a, .actions button { display: inline-flex; align-items: center; gap: 5px; background: none; border: 0; padding: 4px 0; text-decoration: none; cursor: pointer; color: inherit; }
 .actions a:hover, .actions button:hover { color: var(--text); }
 .actions svg { width: 20px; height: 20px; }
+.actions button.save.on { color: var(--safelight); }
+.page-head { padding-bottom: 4px; }
+.page-head .hint { margin: -8px 0 0; }
 .caption { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; max-width: 68ch; }
 .caption.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
 .caption b { font-weight: 600; margin-right: 6px; }

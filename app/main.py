@@ -161,9 +161,11 @@ def _posts_out(posts: list[dict]) -> list[dict]:
         by_code.setdefault(m["shortcode"], []).append(
             {"video": v, "src": _m(m["shortcode"], m["idx"], v, False), "poster": _m(m["shortcode"], m["idx"], v, v)}
         )
+    saved = {r["shortcode"] for r in db.rows(f"SELECT shortcode FROM saved WHERE shortcode IN ({marks})", codes)}
     out = []
     for p in posts:
         p = dict(p)
+        p["saved"] = p["shortcode"] in saved
         items = by_code.get(p["shortcode"], [])
         p["media"] = items
         p["thumb"] = f"/m/{p['shortcode']}/0_thumb.jpg" if items or p.get("thumb_url") else _media_url(p["thumb"])
@@ -367,6 +369,36 @@ def force_refresh(username: str, bg: BackgroundTasks):
     if not fetcher.is_busy(u):
         bg.add_task(_bg_refresh, u)
     return {"ok": True}
+
+
+@app.get("/api/saved")
+def saved_list(before: float | None = None, limit: int = 60):
+    """Saved posts, most recently saved first. `before` pages by saved_at."""
+    limit = max(1, min(limit, 120))
+    rows = db.rows(
+        """SELECT p.*, a.avatar, a.full_name, s.saved_at FROM saved s
+           JOIN posts p ON p.shortcode = s.shortcode
+           LEFT JOIN accounts a ON a.username = p.username
+           WHERE (? IS NULL OR s.saved_at < ?) ORDER BY s.saved_at DESC LIMIT ?""",
+        (before, before, limit))
+    posts = _posts_out(rows)
+    return {"posts": posts, "next": rows[-1]["saved_at"] if len(rows) == limit else None,
+            "count": db.one("SELECT COUNT(*) AS n FROM saved")["n"]}
+
+
+@app.post("/api/saved/{shortcode}")
+def save_post(shortcode: str, bg: BackgroundTasks):
+    if not db.one("SELECT 1 AS x FROM posts WHERE shortcode=?", (shortcode,)):
+        raise HTTPException(404, "Post not cached")
+    db.execute("INSERT OR IGNORE INTO saved VALUES (?,?)", (shortcode, time.time()))
+    bg.add_task(fetcher.keep_post, shortcode)
+    return {"saved": True}
+
+
+@app.delete("/api/saved/{shortcode}")
+def unsave_post(shortcode: str):
+    db.execute("DELETE FROM saved WHERE shortcode=?", (shortcode,))
+    return {"saved": False}
 
 
 @app.get("/api/p/{shortcode}")

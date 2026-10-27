@@ -837,16 +837,44 @@ def prune_expired_stories(keep_days: int = 7):
 
 
 def delete_account_media(username: str):
-    """Used when unfollowing with purge=true."""
-    import shutil
-
-    shutil.rmtree(MEDIA_DIR / username, ignore_errors=True)
-    (MEDIA_DIR / "_avatars" / f"{username}.jpg").unlink(missing_ok=True)
+    """Used when unfollowing with purge=true. Saved posts (and the account row they need
+    for the avatar) are kept."""
+    keep = {r["shortcode"] for r in db.rows(
+        "SELECT p.shortcode FROM posts p JOIN saved s ON s.shortcode = p.shortcode WHERE p.username=?", (username,))}
+    folder = MEDIA_DIR / username
+    if folder.exists():
+        for f in folder.rglob("*"):
+            # shortcodes can contain "_", so match on the "<shortcode>_" prefix
+            if f.is_file() and not any(f.name.startswith(sc + "_") for sc in keep):
+                f.unlink(missing_ok=True)
     with db.conn() as c:
-        c.execute("DELETE FROM media WHERE shortcode IN (SELECT shortcode FROM posts WHERE username=?)", (username,))
-        c.execute("DELETE FROM posts WHERE username=?", (username,))
+        c.execute("DELETE FROM media WHERE shortcode IN (SELECT shortcode FROM posts WHERE username=?) "
+                  "AND shortcode NOT IN (SELECT shortcode FROM saved)", (username,))
+        c.execute("DELETE FROM posts WHERE username=? AND shortcode NOT IN (SELECT shortcode FROM saved)", (username,))
         c.execute("DELETE FROM stories WHERE username=?", (username,))
-        c.execute("DELETE FROM accounts WHERE username=?", (username,))
+        if keep:
+            c.execute("UPDATE accounts SET followed=0, cursor=NULL, history_done=0 WHERE username=?", (username,))
+        else:
+            c.execute("DELETE FROM accounts WHERE username=?", (username,))
+    if not keep:
+        (MEDIA_DIR / "_avatars" / f"{username}.jpg").unlink(missing_ok=True)
+
+
+def keep_post(sc: str):
+    """A saved post: make sure its details are in and every full-size file is on disk now,
+    before Instagram's links expire."""
+    row = db.one("SELECT username, detailed FROM posts WHERE shortcode=?", (sc,))
+    if not row:
+        return
+    if row["detailed"] == 0:
+        try:
+            hydrate(sc)
+        except Exception as e:
+            log.warning("save %s: couldn't fetch details yet: %s", sc, e)
+    for m in db.rows("SELECT idx, is_video FROM media WHERE shortcode=?", (sc,)):
+        _pool.submit(_safe_ensure, sc, m["idx"], False)
+        if m["is_video"]:
+            _pool.submit(_safe_ensure, sc, m["idx"], True)
 
 
 def media_exists(rel: str | None) -> bool:

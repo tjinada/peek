@@ -36,6 +36,8 @@ const I = {
   refresh: '<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5"/></svg>',
   plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>',
   check: '<svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+  mark: '<svg viewBox="0 0 24 24"><path d="M6.5 4h11a1 1 0 0 1 1 1v15l-6.5-4.5L5.5 20V5a1 1 0 0 1 1-1z"/></svg>',
+  marked: '<svg viewBox="0 0 24 24"><path d="M6.5 4h11a1 1 0 0 1 1 1v15l-6.5-4.5L5.5 20V5a1 1 0 0 1 1-1z" fill="currentColor"/></svg>',
 };
 
 let toastTimer;
@@ -145,6 +147,7 @@ function actionsHTML(p) {
     <span title="Likes">${I.heart}${num(p.likes)}</span>
     <span title="Comments">${I.chat}${num(p.comments)}</span>
     <span class="spacer"></span>
+    <button class="save${p.saved ? " on" : ""}" data-sc="${esc(p.shortcode)}" aria-pressed="${!!p.saved}" title="${p.saved ? "Remove from Saved" : "Save"}" aria-label="Save">${p.saved ? I.marked : I.mark}</button>
     ${first ? `<a class="dl" href="${esc(dlHref(p, 0))}" download title="Download this photo or video" aria-label="Download">${I.down}</a>` : ""}
     <a href="https://www.instagram.com/p/${esc(p.shortcode)}/" target="_blank" rel="noopener noreferrer" title="Open on Instagram">${I.out}</a>
   </div>`;
@@ -186,8 +189,34 @@ function cardHTML(p) {
   </article>`;
 }
 
+// One saved state per post, mirrored on every button showing it (feed card + open post).
+function paintSave(sc, on) {
+  $$(`button.save[data-sc="${CSS.escape(sc)}"]`).forEach((b) => {
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-pressed", on);
+    b.title = on ? "Remove from Saved" : "Save";
+    b.innerHTML = on ? I.marked : I.mark;
+  });
+}
+
+function wireSaves(root) {
+  $$("button.save", root).forEach((b) => b.addEventListener("click", async (e) => {
+    e.preventDefault(); e.stopPropagation();
+    const sc = b.dataset.sc, on = b.getAttribute("aria-pressed") !== "true";
+    paintSave(sc, on);
+    if (postIndex[sc]) postIndex[sc].saved = on;
+    try {
+      await api(`/api/saved/${encodeURIComponent(sc)}`, { method: on ? "POST" : "DELETE" });
+      toast(on ? "Saved" : "Removed from Saved");
+    } catch (err) {
+      paintSave(sc, !on);
+      toast(err.message);
+    }
+  }));
+}
+
 function wireCards(root) {
-  wireVideos(root); wireSlides(root); wireDownloads(root, postIndex);
+  wireVideos(root); wireSlides(root); wireDownloads(root, postIndex); wireSaves(root);
   $$(".caption.clamp", root).forEach((c) => c.addEventListener("click", () => c.classList.remove("clamp"), { once: true }));
 }
 
@@ -281,6 +310,26 @@ async function reelsView() {
   if (next) onSentinel(tail, async () => {
     const page = await api(`/api/feed?kind=reels&limit=8&before=${next}`);
     tail.remove(); add(page.posts); box.append(tail);
+    next = page.next;
+    return !!next;
+  });
+}
+
+async function savedView() {
+  view.innerHTML = `<div class="page-pad page-head"><h1 class="page-title">Saved</h1><p class="hint" id="saved-count"></p></div>
+    <div id="saved-body"><div class="loading"></div></div><div id="saved-more"></div>`;
+  const first = await api("/api/saved");
+  const body = $("#saved-body");
+  if (!first.posts.length) {
+    body.innerHTML = empty("Nothing saved yet", `Tap the bookmark on any post to keep it here. Saved posts stay on disk even if you unfollow the account.`);
+    return;
+  }
+  $("#saved-count").textContent = `${first.count.toLocaleString()} saved ${first.count === 1 ? "post" : "posts"}`;
+  body.innerHTML = `<div class="grid" id="grid">${gridHTML(first.posts)}</div>`;
+  let next = first.next;
+  if (next) onSentinel($("#saved-more"), async () => {
+    const page = await api(`/api/saved?before=${next}`);
+    $("#grid").insertAdjacentHTML("beforeend", gridHTML(page.posts));
     next = page.next;
     return !!next;
   });
@@ -723,13 +772,14 @@ async function render() {
   baseHash = hash;
   const tab = route === "u" ? "" : route || "feed";
   $$(".tabs a").forEach((a) => a.dataset.tab === tab ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"));
-  view.classList.toggle("wide", route === "u");
+  view.classList.toggle("wide", route === "u" || route === "saved");
   window.scrollTo(0, 0);
 
   try {
     if (route === "u" && arg) await profileView(decodeURIComponent(arg));
     else if (route === "reels") await reelsView();
     else if (route === "search") searchView();
+    else if (route === "saved") await savedView();
     else if (route === "following") await followingView();
     else await feedView();
   } catch (e) {
