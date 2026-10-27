@@ -12,10 +12,13 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db, fetcher
-from .config import ACCOUNT_DELAY, MEDIA_DIR, PEEK_PASSWORD, PROFILE_TTL_HOURS, REFRESH_HOURS
-
+# Configure logging before importing the fetcher, so its startup messages (session loaded
+# or not) actually show up.
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+from . import db, fetcher  # noqa: E402
+from .config import ACCOUNT_DELAY, MEDIA_DIR, PEEK_PASSWORD, PROFILE_TTL_HOURS, REFRESH_HOURS  # noqa: E402
+
 log = logging.getLogger("peek")
 STATIC = Path(__file__).resolve().parent.parent / "static"
 

@@ -87,6 +87,30 @@ def _make_loader_plain() -> instaloader.Instaloader:
 L = _make_loader()
 
 
+def _get_profile(username: str) -> instaloader.Profile:
+    """Instaloader looks a profile up via its public web page, which shows what a logged-out
+    visitor sees. Age- and region-restricted profiles aren't on that page at all, so with a
+    burner session we retry through the profile API, which does use the session."""
+    try:
+        return instaloader.Profile.from_username(L.context, username)
+    except ProfileNotExistsException:
+        if not logged_in():
+            raise
+        log.info("%s: not on the public page; trying the profile API with the session", username)
+        try:
+            data = L.context.get_json("api/v1/users/web_profile_info/", params={"username": username})
+        except Exception as e:
+            log.warning("%s: profile API lookup failed: %s", username, e)
+            raise ProfileNotExistsException(f"Profile {username} does not exist.") from e
+        user = (data.get("data") or {}).get("user") if isinstance(data, dict) else None
+        if not user:
+            log.warning("%s: profile API returned no user either", username)
+            raise ProfileNotExistsException(f"Profile {username} does not exist.")
+        p = instaloader.Profile(L.context, user)
+        p._has_full_metadata = True  # this response is the full profile; skip another request
+        return p
+
+
 def logged_in() -> bool:
     return L.context.is_logged_in
 
@@ -386,7 +410,7 @@ def refresh_profile(username: str, with_stories: bool = True) -> dict:
 
 def _refresh_locked(username: str, with_stories: bool) -> dict:
     try:
-        p = instaloader.Profile.from_username(L.context, username)
+        p = _get_profile(username)
     except ProfileNotExistsException:
         _record_error(username, "Profile doesn't exist")
         raise FetchError("Profile doesn't exist")
@@ -515,7 +539,7 @@ def _load_older_locked(username: str, count: int) -> dict:
     if acct and acct["history_done"]:
         return {"added": 0, "done": True, "note": None, "codes": []}
     try:
-        p = instaloader.Profile.from_username(L.context, username)
+        p = _get_profile(username)
     except ProfileNotExistsException:
         raise FetchError("Profile doesn't exist")
     except (LoginRequiredException, ConnectionException) as e:
