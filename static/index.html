@@ -8,6 +8,9 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Peek</title>
+  <script>/* apply Display settings before first paint, so there's no flash */
+    try { var d = document.documentElement, t = localStorage.getItem("peek.theme"), z = localStorage.getItem("peek.text");
+      if (t) d.dataset.theme = t; if (z) d.dataset.text = z; } catch (e) {}</script>
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icons/icon-192.png">
   <link rel="apple-touch-icon" href="/icons/icon-192.png">

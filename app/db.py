@@ -87,6 +87,21 @@ CREATE TABLE IF NOT EXISTS highlight_items (
     path         TEXT,
     poster       TEXT
 );
+CREATE TABLE IF NOT EXISTS session (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),   -- one burner session
+    username    TEXT,
+    sessionid   TEXT,
+    csrftoken   TEXT,
+    mid         TEXT,
+    ig_did      TEXT,
+    rur         TEXT,
+    state       TEXT DEFAULT 'unchecked',             -- ok | unchecked | dead | none
+    checked_at  REAL,
+    last_error  TEXT,
+    source      TEXT,                                 -- env | ui
+    env_hash    TEXT,                                 -- which IG_SESSIONID was seeded last
+    saved_at    REAL
+);
 CREATE TABLE IF NOT EXISTS groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL);
 CREATE TABLE IF NOT EXISTS account_groups (
     username TEXT NOT NULL,

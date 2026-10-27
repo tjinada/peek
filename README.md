@@ -45,15 +45,30 @@ On a phone, open the page and use "Add to Home Screen" to install it.
 | Risk | Occasional login walls | Burner may get flagged or banned |
 
 To add a burner session: sign in to a throwaway account in a browser, open dev tools →
-Application → Cookies → `instagram.com`, copy the `sessionid` value, then set in `.env`:
+Application → Cookies → `instagram.com`, and copy the `sessionid` value. Then either:
 
-```
-IG_USER=your_burner_username
-IG_SESSIONID=<paste>
-```
+- **From the app (no restart):** Following page → Burner session → paste it → Check and save.
+  Peek asks Instagram who the session belongs to and only saves it if Instagram accepts it.
+- **From `.env`:** set `IG_SESSIONID=<paste>` (and optionally `IG_USER`) and restart.
 
-Restart the container. The Following page will say "Stories are on" once it's working.
-If the session expires, Peek falls back to logged-out behaviour; paste a fresh cookie.
+The env vars only seed the session. It's stored in the database, and whatever you paste
+in the app wins until you change `IG_SESSIONID` in `.env` again.
+
+Sessions expire every few weeks. Peek checks it every 6 hours, and any request that fails
+with a login error triggers a check straight away. When it has expired, Peek switches to
+logged out (posts keep working) and shows a banner on profiles and the Following page with
+a link to paste a fresh one.
+
+## Shortcuts and extras
+
+- Press `?` for keyboard shortcuts (`j`/`k` through the feed and reels, `o` to open, `s` to save).
+- Tap a photo in an open post for a full-screen viewer with pinch, wheel and double-tap zoom.
+- Reels and stories have a speed button (remembered) and a seek bar.
+- Following → Display: theme (auto/light/dark) and text size, per device.
+- Following → Select: unfollow or add/remove a group for many accounts at once.
+- **Zip** on a profile, or the download icon on a group, saves everything Peek has for it
+  (posts, reels, stories) as one zip. Add `&videos=0` to the URL to leave videos out.
+  Anything Peek couldn't fetch is listed in `missing.txt` inside the zip.
 
 ## Notes
 

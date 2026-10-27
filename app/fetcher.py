@@ -2,7 +2,10 @@
 this module maps its objects into the cache and downloads media to disk (Instagram's
 CDN URLs are signed and expire, so a local copy is the only thing that lasts).
 Metadata is stored first; files download in a parallel pool afterwards."""
+import hashlib
 import json
+import queue
+import zipfile
 from pathlib import Path
 import logging
 import random
@@ -16,6 +19,8 @@ import httpx
 import instaloader
 from PIL import Image
 from instaloader.exceptions import (
+    AbortDownloadException,
+    QueryReturnedBadRequestException,
     BadResponseException,
     ConnectionException,
     LoginRequiredException,
@@ -34,7 +39,7 @@ log = logging.getLogger("peek.fetcher")
 
 # Instaloader isn't thread-safe and Instagram notices parallel requests, so every
 # call goes through one lock. Throughput doesn't matter for a single user.
-_lock = threading.Lock()
+_lock = threading.RLock()  # re-entrant: a session reload can happen inside a locked fetch
 _busy: set[str] = set()
 
 UA = (
@@ -107,63 +112,277 @@ def _check_cooldown():
                          + time.strftime("%H:%M", time.localtime(_cooldown_until)))
 
 
-def _make_loader() -> instaloader.Instaloader:
-    L = instaloader.Instaloader(
-        download_pictures=False,
-        download_videos=False,
-        download_video_thumbnails=False,
-        save_metadata=False,
-        compress_json=False,
-        quiet=True,
-        max_connection_attempts=2,
-        request_timeout=30,
-        user_agent=UA,
-        rate_controller=_PauseOn429,
-    )
-    # A bad session must never stop the app from starting: fall back to logged out.
+# ---------------------------------------------------------------- burner session
+# The session lives in the DB so it can be replaced from the UI without a restart. The env
+# vars only seed it: on startup, if IG_SESSIONID differs from what was seeded last time, it's
+# copied in; otherwise whatever is in the DB (perhaps pasted in the UI since) wins.
+#
+# A session expires every few weeks. Peek notices two ways: test_login() every few hours, and
+# any logged-in request that fails with a login error triggers an immediate check. A dead
+# session switches Peek to logged out, so posts keep working while the UI says what's off.
+
+class SessionError(Exception):
+    def __init__(self, msg: str, state: str):
+        super().__init__(msg)
+        self.state = state  # "dead" (Instagram rejected it) or "unknown" (couldn't check)
+
+
+def _session_row() -> dict | None:
     try:
-        if IG_USER and IG_SESSIONID:
-            cookies = {
-                "sessionid": IG_SESSIONID,
-                "ds_user_id": IG_SESSIONID.split("%3A")[0],
-                # Instaloader sends this back as the X-CSRFToken header. Instagram only checks
-                # that cookie and header match, so a random one works if none was copied.
-                "csrftoken": IG_CSRFTOKEN or secrets.token_hex(16),
-            }
-            # Device cookies, if they were copied: Instaloader turns these into the app-style
-            # headers (x-mid, x-ig-device-id, ig-u-rur). Without them, app-side requests look
-            # device-less and Instagram refuses them more often.
-            for name, value in (("mid", IG_MID), ("ig_did", IG_DID), ("rur", IG_RUR)):
-                if value:
-                    cookies[name] = value
-            L.load_session(IG_USER, cookies)
-            log.info("using session for %s", IG_USER)
-        elif IG_USER:
-            L.load_session_from_file(IG_USER)
-            log.info("loaded session file for %s", IG_USER)
-    except FileNotFoundError:
-        log.warning("IG_USER set but no IG_SESSIONID or session file; running logged out")
-    except Exception as e:
-        log.error("couldn't load the Instagram session (%s); running logged out", e)
-        return _make_loader_plain()
-    return L
+        return db.one("SELECT * FROM session WHERE id=1")
+    except Exception:  # table not created yet (fetcher imported before db.init)
+        return None
 
 
-def _make_loader_plain() -> instaloader.Instaloader:
-    return instaloader.Instaloader(
-        download_pictures=False, download_videos=False, download_video_thumbnails=False,
-        save_metadata=False, compress_json=False, quiet=True, max_connection_attempts=2,
-        request_timeout=30, user_agent=UA, rate_controller=_PauseOn429,
-    )
+def _write_session(**cols):
+    cols["id"] = 1
+    names = ",".join(cols)
+    marks = ",".join("?" * len(cols))
+    updates = ",".join(f"{k}=excluded.{k}" for k in cols if k != "id")
+    db.execute(f"INSERT INTO session ({names}) VALUES ({marks}) ON CONFLICT(id) DO UPDATE SET {updates}",
+               tuple(cols.values()))
 
 
-L = _make_loader()
+def _clean_sessionid(raw: str) -> str:
+    """Accept the cookie however it was copied: with or without 'sessionid=', quotes,
+    or decoded colons (browsers show it URL-encoded, some extensions decode it)."""
+    v = (raw or "").strip().strip(";").strip()
+    if v.lower().startswith("sessionid="):
+        v = v[len("sessionid="):]
+    v = v.strip().strip('"').strip("'")
+    if ":" in v and "%3A" not in v.upper():
+        v = v.replace(":", "%3A")
+    return v
+
+
+def _cookies(row: dict) -> dict:
+    sid = row["sessionid"]
+    cookies = {
+        "sessionid": sid,
+        "ds_user_id": sid.replace("%3a", "%3A").split("%3A")[0],
+        # Instaloader sends this back as the X-CSRFToken header. Instagram only checks
+        # that cookie and header match, so a random one works if none was copied.
+        "csrftoken": row.get("csrftoken") or secrets.token_hex(16),
+    }
+    # Device cookies, if they were copied: Instaloader turns these into the app-style
+    # headers (x-mid, x-ig-device-id, ig-u-rur). Without them, app-side requests look
+    # device-less and Instagram refuses them more often.
+    for name in ("mid", "ig_did", "rur"):
+        if row.get(name):
+            cookies[name] = row[name]
+    return cookies
+
+
+def _dead_reason(e: BaseException) -> str | None:
+    """If this error means Instagram no longer accepts the session, say why in plain words."""
+    seen = set()
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        s = str(e)
+        low = s.lower()
+        if "checkpoint" in low or "challenge" in low:
+            return "Instagram wants the burner to pass a security check. Open the account in the Instagram app, then paste a fresh session."
+        if "feedback_required" in low:
+            return None  # an action block, not a logout
+        if (isinstance(e, (LoginRequiredException, AbortDownloadException)) or "login_required" in low
+                or "redirected to login" in low or s.startswith("401") or " 401 " in s):
+            return "Instagram logged the burner out. Paste a fresh sessionid to turn stories, highlights and restricted profiles back on."
+        e = e.__cause__ or e.__context__
+    return None
+
+
+def _guard(ctx, watch: bool):
+    """Every Instagram JSON call goes through context.get_json (GraphQL and app API included).
+    Wrap it so a logged-out session is noticed, and so Instaloader's AbortDownloadException
+    (not an InstaloaderException, so nothing in Peek caught it) becomes a ConnectionException."""
+    orig = ctx.get_json
+
+    def get_json(*a, **k):
+        try:
+            return orig(*a, **k)
+        except AbortDownloadException as e:
+            if watch and ctx.is_logged_in and _dead_reason(e):
+                _suspect_session()
+            raise ConnectionException(str(e)) from e
+        except (ConnectionException, LoginRequiredException, QueryReturnedBadRequestException) as e:
+            if watch and ctx.is_logged_in and not isinstance(e, TooManyRequestsException) and _dead_reason(e):
+                _suspect_session()
+            raise
+
+    ctx.get_json = get_json
+
 
 # Instaloader pauses a random 0-15s (about 1.7s on average) before every Instagram request.
 # Peek already makes one request at a time, spaces out background work, and pauses on 429s,
 # so a short pause is enough and makes lookups and "Load older" much quicker.
 REQUEST_PAUSE = (0.3, 1.0)
-L.context.do_sleep = lambda: time.sleep(random.uniform(*REQUEST_PAUSE))
+
+
+def _make_loader_plain(watch: bool = True) -> instaloader.Instaloader:
+    loader = instaloader.Instaloader(
+        download_pictures=False, download_videos=False, download_video_thumbnails=False,
+        save_metadata=False, compress_json=False, quiet=True, max_connection_attempts=2,
+        request_timeout=30, user_agent=UA, rate_controller=_PauseOn429,
+    )
+    loader.context.do_sleep = lambda: time.sleep(random.uniform(*REQUEST_PAUSE))
+    _guard(loader.context, watch)
+    return loader
+
+
+def _make_loader() -> instaloader.Instaloader:
+    """A loader for the stored session, or a logged-out one. A bad session never stops the app."""
+    row = _session_row()
+    if row and row["sessionid"] and row["state"] != "dead":
+        try:
+            loader = _make_loader_plain()
+            loader.load_session(row["username"] or IG_USER or "burner", _cookies(row))
+            log.info("using session for %s", row["username"] or IG_USER or "the burner")
+            return loader
+        except Exception as e:
+            log.error("couldn't load the Instagram session (%s); running logged out", e)
+    elif not row and IG_USER and not IG_SESSIONID:
+        try:  # older setups: a session file saved by `instaloader --login`
+            loader = _make_loader_plain()
+            loader.load_session_from_file(IG_USER)
+            log.info("loaded session file for %s", IG_USER)
+            return loader
+        except FileNotFoundError:
+            log.warning("IG_USER set but no IG_SESSIONID or session file; running logged out")
+        except Exception as e:
+            log.error("couldn't load the session file (%s); running logged out", e)
+    return _make_loader_plain()
+
+
+L = _make_loader_plain()  # replaced by init_session() once the DB is ready
+
+
+def _reload_loader():
+    """Rebuild the loader from the stored session and swap it in. Takes the Instagram lock so
+    nothing is halfway through a request sequence when the session changes under it."""
+    global L
+    new = _make_loader()
+    with _lock:
+        L = new
+    log.info("Instagram session: %s", "logged in" if new.context.is_logged_in else "logged out")
+
+
+def init_session():
+    """Seed the session from the env vars if they changed, then build the loader."""
+    if IG_SESSIONID:
+        sid = _clean_sessionid(IG_SESSIONID)
+        h = hashlib.sha256(sid.encode()).hexdigest()[:16]
+        row = _session_row()
+        if not row or row["env_hash"] != h:
+            _write_session(username=(IG_USER or "").lower() or None, sessionid=sid, csrftoken=IG_CSRFTOKEN or None,
+                           mid=IG_MID or None, ig_did=IG_DID or None, rur=IG_RUR or None, state="unchecked",
+                           checked_at=None, last_error=None, source="env", env_hash=h, saved_at=time.time())
+            log.info("session seeded from the environment")
+    _reload_loader()
+
+
+def _probe_session(cookies: dict, username: str | None) -> dict:
+    """Ask Instagram who this session belongs to. One request, on a throwaway loader, and a
+    429 here doesn't pause the rest of Peek."""
+    t = _make_loader_plain(watch=False)
+    t.load_session(username or "burner", cookies)
+    _probe.on = True
+    try:
+        data = t.context.get_json("api/v1/accounts/current_user/", {"edit": "true"})
+    except TooManyRequestsException:
+        return {"state": "unknown", "error": "Instagram is rate-limiting right now (429). Try again in a few minutes."}
+    except Exception as e:
+        why = _dead_reason(e)
+        if why:
+            return {"state": "dead", "error": why}
+        return {"state": "unknown", "error": f"Couldn't reach Instagram to check: {str(e)[:160]}"}
+    finally:
+        _probe.on = False
+    user = (data or {}).get("user") or {}
+    if user.get("username"):
+        return {"state": "ok", "username": user["username"].lower(), "error": None}
+    return {"state": "dead", "error": "Instagram didn't recognise this session."}
+
+
+def session_info() -> dict:
+    row = _session_row() or {}
+    sid = row.get("sessionid")
+    return {
+        "configured": bool(sid),
+        "state": row.get("state") if sid else "none",  # ok | unchecked | dead | none
+        "active": logged_in(),
+        "username": row.get("username"),
+        "checked_at": row.get("checked_at"),
+        "error": row.get("last_error"),
+        "source": row.get("source"),
+        "hint": "…" + sid.replace("%3A", ":")[-4:] if sid else None,
+        "has_device_cookies": bool(row.get("mid") or row.get("ig_did")),
+    }
+
+
+def set_session(fields: dict) -> dict:
+    """Validate a pasted session with Instagram and, only if it works, store it and switch to it.
+    Raises SessionError."""
+    sid = _clean_sessionid(fields.get("sessionid", ""))
+    if not sid or "%3A" not in sid.upper():
+        raise SessionError("That doesn't look like a sessionid. It starts with digits followed by %3A.", "dead")
+    extra = {k: (fields.get(k) or "").strip() or None for k in ("csrftoken", "mid", "ig_did", "rur")}
+    cand = {"sessionid": sid, **extra}
+    res = _probe_session(_cookies(cand), None)
+    if res["state"] != "ok":
+        raise SessionError(res["error"], res["state"])
+    row = _session_row() or {}
+    _write_session(username=res["username"], **cand, state="ok", checked_at=time.time(), last_error=None,
+                   source="ui", env_hash=row.get("env_hash"), saved_at=time.time())
+    _reload_loader()
+    log.info("session replaced from the UI: %s", res["username"])
+    return session_info()
+
+
+def test_login() -> dict:
+    """Check the stored session is still accepted, and switch login state if that changed."""
+    row = _session_row()
+    if not row or not row["sessionid"]:
+        return session_info()
+    res = _probe_session(_cookies(row), row["username"])
+    if res["state"] == "unknown":  # couldn't tell: keep the current state, note why
+        db.execute("UPDATE session SET last_error=? WHERE id=1", (res["error"],))
+        return session_info()
+    was = row["state"]
+    db.execute("UPDATE session SET state=?, checked_at=?, last_error=?, username=COALESCE(?, username) WHERE id=1",
+               (res["state"], time.time(), res["error"], res.get("username")))
+    if res["state"] == "dead" and was != "dead":
+        log.warning("Instagram session is no longer valid: %s", res["error"])
+    if (res["state"] == "ok") != logged_in() or res.get("username") not in (None, row["username"]):
+        _reload_loader()
+    return session_info()
+
+
+def clear_session():
+    """Sign out: keep the row (and its env hash, so an unchanged .env doesn't re-seed it)."""
+    db.execute("UPDATE session SET sessionid=NULL, csrftoken=NULL, mid=NULL, ig_did=NULL, rur=NULL, "
+               "username=NULL, state='none', last_error=NULL, source='ui' WHERE id=1")
+    _reload_loader()
+
+
+_suspect_at = 0.0
+
+
+def _suspect_session():
+    """A logged-in request failed with a login error: confirm with Instagram (at most every
+    10 minutes) in the background, so one odd response doesn't log Peek out."""
+    global _suspect_at
+    if time.time() - _suspect_at < 600:
+        return
+    _suspect_at = time.time()
+    log.info("a request failed with a login error; checking the session")
+
+    def run():
+        try:
+            test_login()
+        except Exception as e:
+            log.warning("session check failed: %s", e)
+
+    threading.Thread(target=run, name="peek-session-check", daemon=True).start()
 
 
 class LookupRefused(Exception):
@@ -1242,6 +1461,8 @@ def _record_error(username: str, msg: str):
 
 def _friendly(e: Exception) -> str:
     s = str(e)
+    if (_session_row() or {}).get("sessionid") and _dead_reason(e):
+        return "The burner session has expired. Paste a fresh one on the Following page."
     if "401" in s or "login" in s.lower():
         return "Instagram wants a login for more (add a burner session for full history)"
     if isinstance(e, TooManyRequestsException) or "429" in s or "Please wait" in s:
@@ -1330,3 +1551,113 @@ def keep_post(sc: str, only: int | None = None):
 
 def media_exists(rel: str | None) -> bool:
     return bool(rel) and (MEDIA_DIR / rel).exists()
+
+# ---------------------------------------------------------------- zip downloads
+# Built in a worker thread and streamed out through a small queue, so a multi-GB profile
+# never sits in memory or on disk as a whole. Media is already compressed: store, don't deflate.
+# Files not downloaded yet are pulled from Instagram's CDN on the way; ones whose links have
+# expired (or posts never fetched in full) are listed in missing.txt instead.
+
+
+class _QueueWriter:
+    """Write-only file object for ZipFile. No tell/seek, so zipfile streams with data descriptors."""
+    CHUNK = 256 * 1024  # zipfile writes 8 KB at a time; send bigger pieces
+
+    def __init__(self, q: queue.Queue, stop: threading.Event):
+        self.q, self.stop, self.buf = q, stop, bytearray()
+
+    def write(self, b) -> int:
+        self.buf += b
+        if len(self.buf) >= self.CHUNK:
+            self._send()
+        return len(b)
+
+    def flush(self):
+        if self.buf:
+            self._send()
+
+    def _send(self):
+        data, self.buf = bytes(self.buf), bytearray()
+        while not self.stop.is_set():
+            try:
+                self.q.put(data, timeout=1)
+                return
+            except queue.Full:
+                continue
+        raise OSError("download cancelled")
+
+
+def _zip_entries(usernames: list[str], videos: bool):
+    """(arcname, local path or None, why-missing) for every file of these accounts."""
+    marks = ",".join("?" * len(usernames))
+    posts = db.rows(f"SELECT shortcode, username, taken_at, detailed FROM posts WHERE username IN ({marks}) "
+                    "ORDER BY username, taken_at DESC", usernames)
+    for p in posts:
+        day = time.strftime("%Y-%m-%d", time.localtime(p["taken_at"]))
+        items = db.rows("SELECT idx, is_video FROM media WHERE shortcode=? ORDER BY idx", (p["shortcode"],))
+        if not items:
+            yield f"{p['username']}/{day}_{p['shortcode']}", None, "details not fetched yet (open the post once in Peek)"
+            continue
+        for m in items:
+            if m["is_video"] and not videos:
+                continue
+            base = f"{p['username']}/{day}_{p['shortcode']}" + (f"_{m['idx'] + 1}" if len(items) > 1 else "")
+            try:
+                rel = ensure_local(p["shortcode"], m["idx"], poster=False)
+            except Exception as e:
+                rel, why = None, str(e)[:120]
+            else:
+                why = "Instagram's link for it has expired"
+            yield base, rel, why
+    for st in db.rows(f"SELECT id, username, taken_at, path FROM stories WHERE username IN ({marks}) "
+                      "AND path IS NOT NULL ORDER BY username, taken_at", usernames):
+        if st["path"].endswith(".mp4") and not videos:
+            continue
+        day = time.strftime("%Y-%m-%d", time.localtime(st["taken_at"]))
+        yield f"{st['username']}/stories/{day}_{st['id']}", st["path"], "file no longer on disk"
+
+
+def zip_stream(usernames: list[str], videos: bool = True):
+    q: queue.Queue = queue.Queue(maxsize=16)  # ~16 chunks of backpressure
+    stop = threading.Event()
+    DONE = object()
+
+    def build():
+        missing = []
+        try:
+            out = _QueueWriter(q, stop)
+            with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED, allowZip64=True) as zf:
+                for arc, rel, why in _zip_entries(usernames, videos):
+                    if stop.is_set():
+                        return
+                    path = MEDIA_DIR / rel if rel else None
+                    if not path or not path.exists():
+                        missing.append(f"{arc}: {why}")
+                        continue
+                    ext = sniff(path) or rel.rsplit(".", 1)[-1]
+                    zf.write(path, f"{arc}.{ext}")
+                if missing:
+                    zf.writestr("missing.txt", "Not included:\n" + "\n".join(missing) + "\n")
+            out.flush()
+        except OSError as e:
+            if not stop.is_set():
+                log.warning("zip failed: %s", e)
+        except Exception:
+            log.exception("zip failed")
+        finally:
+            while not stop.is_set():
+                try:
+                    q.put(DONE, timeout=1)
+                    break
+                except queue.Full:
+                    continue
+
+    threading.Thread(target=build, name="peek-zip", daemon=True).start()
+    try:
+        while True:
+            chunk = q.get()
+            if chunk is DONE:
+                return
+            yield chunk
+    finally:
+        stop.set()  # client went away (or we finished): let the builder exit

@@ -61,6 +61,42 @@ async function api(path, opts = {}) {
   return data;
 }
 
+/* ================================================================ display settings
+   Theme follows the system unless picked; text size scales every rem-based font size.
+   Stored per device. index.html applies them before first paint. */
+
+const THEME_COLORS = { dark: "#1c1922", light: "#e9ebee" };
+function applyDisplay() {
+  const d = document.documentElement;
+  const theme = localStorageGet("peek.theme"), text = localStorageGet("peek.text");
+  theme ? (d.dataset.theme = theme) : delete d.dataset.theme;
+  text ? (d.dataset.text = text) : delete d.dataset.text;
+  // the browser/OS bar colour: both metas get the picked theme, or go back to per-scheme
+  $$('meta[name="theme-color"]').forEach((m) => {
+    m.dataset.scheme ??= m.media.includes("dark") ? "dark" : "light";
+    m.content = THEME_COLORS[theme || m.dataset.scheme];
+  });
+}
+
+function displayHTML() {
+  const theme = localStorageGet("peek.theme") || "", text = localStorageGet("peek.text") || "";
+  const seg = (key, cur, opts) => `<div class="seg small" role="radiogroup" data-key="${key}">${opts.map(([v, label]) =>
+    `<button role="radio" aria-checked="${v === cur}" data-v="${v}">${label}</button>`).join("")}</div>`;
+  return `<h2 class="sub">Display</h2>
+    <div class="display-row"><span>Theme</span>${seg("peek.theme", theme, [["", "Auto"], ["light", "Light"], ["dark", "Dark"]])}</div>
+    <div class="display-row"><span>Text size</span>${seg("peek.text", text, [["s", "Small"], ["", "Default"], ["l", "Large"], ["xl", "Larger"]])}</div>
+    <p class="hint">Saved on this device. Press <kbd>?</kbd> anywhere for keyboard shortcuts.</p>`;
+}
+
+function wireDisplay(box) {
+  $$(".seg[data-key] button", box).forEach((b) => b.addEventListener("click", () => {
+    const seg = b.parentElement;
+    b.dataset.v ? localStorageSet(seg.dataset.key, b.dataset.v) : localStorageRemove(seg.dataset.key);
+    $$("button", seg).forEach((x) => x.setAttribute("aria-checked", x === b));
+    applyDisplay();
+  }));
+}
+
 /* ================================================================ video handling
    One observer drives every inline video: play when mostly on screen, pause otherwise.
    Sound is a single app-wide toggle, like any feed. */
@@ -74,14 +110,63 @@ const vidObserver = new IntersectionObserver((entries) => {
   }
 }, { threshold: [0, 0.6] });
 
+function toggleMute() {
+  muted = !muted;
+  $$("video").forEach((v) => (v.muted = muted));
+  $$(".mute, #s-mute").forEach((m) => (m.innerHTML = muted ? I.muted : I.sound));
+}
+
 function wireVideos(root) {
   $$("video[data-auto]", root).forEach((v) => vidObserver.observe(v));
-  $$(".mute", root).forEach((b) => b.addEventListener("click", (ev) => {
-    ev.stopPropagation(); ev.preventDefault();
-    muted = !muted;
-    $$("video").forEach((v) => (v.muted = muted));
-    $$(".mute").forEach((m) => (m.innerHTML = muted ? I.muted : I.sound));
-  }));
+  $$(".mute", root).forEach((b) => {
+    b.addEventListener("click", (ev) => { ev.stopPropagation(); ev.preventDefault(); toggleMute(); });
+    b.addEventListener("mousedown", (e) => e.preventDefault());
+  });
+}
+
+/* Playback speed and seeking for the reel and story viewers. Speed is one setting for
+   both, remembered per device. */
+const RATES = [1, 1.5, 2, 0.5];
+let rate = RATES.includes(+localStorageGet("peek.rate")) ? +localStorageGet("peek.rate") : 1;
+
+function applyRate(v) { v.defaultPlaybackRate = rate; v.playbackRate = rate; }
+function speedHTML(cls = "speed") { return `<button class="${cls}" aria-label="Playback speed">${rate}×</button>`; }
+function cycleRate() {
+  rate = RATES[(RATES.indexOf(rate) + 1) % RATES.length];
+  localStorageSet("peek.rate", rate);
+  $$("video[data-rated]").forEach(applyRate);
+  $$(".speed").forEach((b) => (b.textContent = `${rate}×`));
+}
+function wireSpeed(root) {
+  $$(".speed", root).forEach((b) => {
+    b.addEventListener("click", (e) => { e.stopPropagation(); e.preventDefault(); cycleRate(); });
+    // a mouse click shouldn't leave focus here, or Space (play/pause) would press it again
+    b.addEventListener("mousedown", (e) => e.preventDefault());
+  });
+}
+
+const seekHTML = () => `<div class="seek" role="slider" aria-label="Seek" aria-valuemin="0" aria-valuemax="100"><i><b></b></i></div>`;
+function paintSeek(bar, video) {
+  const pct = video.duration ? (video.currentTime / video.duration) * 100 : 0;
+  $("b", bar).style.width = pct + "%";
+  bar.setAttribute("aria-valuenow", Math.round(pct));
+}
+// Tap or drag along the bar to jump. Pointer capture keeps the drag going off the bar.
+function wireSeek(bar, video) {
+  const go = (e) => {
+    const r = bar.getBoundingClientRect();
+    if (video.duration) video.currentTime = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * video.duration;
+    paintSeek(bar, video);
+  };
+  bar.addEventListener("pointerdown", (e) => {
+    e.stopPropagation(); e.preventDefault();
+    bar.setPointerCapture(e.pointerId); bar.classList.add("drag"); go(e);
+  });
+  bar.addEventListener("pointermove", (e) => { if (bar.hasPointerCapture(e.pointerId)) go(e); });
+  const end = (e) => { bar.classList.remove("drag"); if (bar.hasPointerCapture(e.pointerId)) bar.releasePointerCapture(e.pointerId); };
+  bar.addEventListener("pointerup", end);
+  bar.addEventListener("pointercancel", end);
+  bar.addEventListener("click", (e) => e.stopPropagation());
 }
 
 function stepSlides(frame, dir) {
@@ -408,10 +493,13 @@ async function reelsView(seq = renderSeq) {
   wireGroupBar(view);
   const box = $("#reels");
   const reelHTML = (p) => {
+    postIndex[p.shortcode] ??= p;
     const v = p.media.find((m) => m.video && m.src) || p.media[0];
-    return `<section class="reel">
-      <video src="${esc(v?.src || "")}" poster="${esc(v?.poster || p.thumb || "")}" playsinline loop muted preload="metadata" data-auto></video>
+    return `<section class="reel" data-sc="${esc(p.shortcode)}">
+      <video src="${esc(v?.src || "")}" poster="${esc(v?.poster || p.thumb || "")}" playsinline loop muted preload="metadata" data-auto data-rated></video>
       <button class="mute" aria-label="Toggle sound">${muted ? I.muted : I.sound}</button>
+      ${speedHTML("speed reel-speed")}
+      ${seekHTML()}
       <div class="reel-meta">
         <a href="#/u/${esc(p.username)}"><img class="avatar" src="${esc(p.avatar || AVATAR_FALLBACK)}" alt="">${esc(p.username)}</a>
         <span style="opacity:.7;font-size:13px;margin-left:6px">${ago(p.taken_at)}</span>
@@ -422,10 +510,29 @@ async function reelsView(seq = renderSeq) {
   const add = (list) => {
     const frag = document.createElement("div");
     frag.innerHTML = list.map(reelHTML).join("");
-    $$("video", frag).forEach((v) => v.addEventListener("click", () => (v.paused ? v.play() : v.pause())));
-    wireVideos(frag);
+    $$("video", frag).forEach((v) => {
+      applyRate(v);
+      v.addEventListener("click", () => (v.paused ? v.play() : v.pause()));
+      wireSeek($(".seek", v.parentElement), v);
+    });
+    wireVideos(frag); wireSpeed(frag);
     box.append(...frag.children);
   };
+  // Fill exactly the space between whatever sits above (header, group chips) and the tab
+  // bar. A fixed calc() guessed the chip row's height and ran under the tabs.
+  const fit = () => {
+    if (!box.isConnected) return removeEventListener("resize", fit);
+    box.style.height = Math.max(240, innerHeight - box.getBoundingClientRect().top - $(".tabs").offsetHeight) + "px";
+  };
+  fit();
+  addEventListener("resize", fit);
+  // keep the playing reel's seek bar moving (timeupdate alone is too coarse)
+  const loop = () => {
+    if (!box.isConnected) return;
+    $$(".reel video", box).forEach((v) => { if (!v.paused) paintSeek($(".seek", v.parentElement), v); });
+    requestAnimationFrame(loop);
+  };
+  requestAnimationFrame(loop);
   add(posts);
   const tail = document.createElement("div");
   box.append(tail);
@@ -532,10 +639,162 @@ function searchView() {
 
 function localStorageGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
 function localStorageSet(k, v) { try { localStorage.setItem(k, v); } catch {} }
+function localStorageRemove(k) { try { localStorage.removeItem(k); } catch {} }
 function rememberRecent(u) {
   const list = JSON.parse(localStorageGet("peek.recent") || "[]").filter((x) => x !== u);
   list.unshift(u);
   localStorageSet("peek.recent", JSON.stringify(list.slice(0, 8)));
+}
+
+/* ================================================================ burner session */
+
+// Shown wherever a dead session matters, so stories and highlights don't just quietly vanish.
+function sessionBanner(s) {
+  if (s?.state !== "dead") return "";
+  return `<div class="banner" role="alert"><b>Burner session expired.</b> Stories, highlights, the Reels tab and restricted profiles are off until you replace it.
+    <a href="#/following/session">Update session</a></div>`;
+}
+
+function sessionCardHTML(s) {
+  const when = s.checked_at ? `checked ${ago(s.checked_at)}${ago(s.checked_at).endsWith("now") ? "" : " ago"}` : "not checked yet";
+  const line = s.state === "ok" ? `<span class="pill ok">Working</span> Logged in as <b>@${esc(s.username)}</b>, ${when}.`
+    : s.state === "unchecked" ? `<span class="pill">Not checked</span> Session ${esc(s.hint)} from ${s.source === "env" ? "the server config" : "here"}, ${when}.`
+    : s.state === "dead" ? `<span class="pill bad">Expired</span> ${esc(s.error || "Instagram no longer accepts this session.")}`
+    : `<span class="pill">Off</span> No burner session. Peek runs logged out: no stories, highlights, Reels tab or restricted profiles.`;
+  const open = s.state === "dead" || s.state === "none";
+  return `<h2 class="sub">Burner session</h2>
+    <p class="session-line">${line}</p>
+    ${s.error && s.state !== "dead" ? `<p class="hint">Last check: ${esc(s.error)}</p>` : ""}
+    ${s.configured ? `<div class="row-btns"><button class="btn" id="s-check">${I.refresh}Check now</button><button class="btn" id="s-out">Sign out</button></div>` : ""}
+    <details class="session-form" ${open ? "open" : ""}>
+      <summary>${s.configured ? "Replace session" : "Add a session"}</summary>
+      <form id="s-form">
+        <label>sessionid<input name="sessionid" autocomplete="off" autocapitalize="off" spellcheck="false" required placeholder="1234567890%3AAbCd…%3A12%3A…"></label>
+        <details><summary>More cookies (optional, from the same browser)</summary>
+          <div class="cookie-grid">
+            <label>csrftoken<input name="csrftoken" autocomplete="off" spellcheck="false"></label>
+            <label>mid<input name="mid" autocomplete="off" spellcheck="false"></label>
+            <label>ig_did<input name="ig_did" autocomplete="off" spellcheck="false"></label>
+            <label>rur<input name="rur" autocomplete="off" spellcheck="false"></label>
+          </div>
+        </details>
+        <p class="hint">In a browser signed in to the burner: dev tools → Application → Cookies → instagram.com, copy <b>sessionid</b>. Peek checks it with Instagram before saving.</p>
+        <p class="form-err" id="s-err" hidden></p>
+        <button class="btn primary" id="s-save">Check and save</button>
+      </form>
+    </details>`;
+}
+
+function wireSessionCard(box, s) {
+  const repaint = (next) => { box.innerHTML = sessionCardHTML(next); wireSessionCard(box, next); };
+  $("#s-check", box)?.addEventListener("click", async (e) => {
+    e.target.disabled = true; e.target.lastChild.textContent = "Checking";
+    try { const next = await api("/api/session/check", { method: "POST" }); repaint(next);
+      toast(next.state === "ok" ? "Session is working" : next.state === "dead" ? "Session has expired" : "Couldn't check right now"); }
+    catch (err) { toast(err.message); repaint(s); }
+  });
+  $("#s-out", box)?.addEventListener("click", async () => {
+    repaint(await api("/api/session", { method: "DELETE" }));
+    toast("Signed out. Peek is running logged out.");
+  });
+  $("#s-form", box).addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.target, btn = $("#s-save", box), err = $("#s-err", box);
+    const body = Object.fromEntries(["sessionid", "csrftoken", "mid", "ig_did", "rur"].map((k) => [k, f[k].value.trim() || null]));
+    btn.disabled = true; btn.textContent = "Checking with Instagram"; err.hidden = true;
+    try {
+      const next = await api("/api/session", { method: "POST", body });
+      repaint(next);
+      toast(`Logged in as @${next.username}`);
+    } catch (ex) {
+      err.textContent = ex.message; err.hidden = false;
+      btn.disabled = false; btn.textContent = "Check and save";
+    }
+  });
+}
+
+/* Bulk actions on Following: Select shows checkboxes and an action bar. The selection
+   survives the re-render after a group change, so several groups can be applied in a row. */
+const followSel = { on: false, picked: new Set() };
+
+function wireBulk(accounts, groups) {
+  const head = $("#list-head"), ul = $("#people");
+  const names = new Set(accounts.map((a) => a.username));
+  for (const u of followSel.picked) if (!names.has(u)) followSel.picked.delete(u);
+  head.hidden = false;
+  head.innerHTML = `<span>${accounts.length} account${accounts.length === 1 ? "" : "s"}</span>
+    <button class="btn small" id="sel-toggle" aria-pressed="${followSel.on}">${followSel.on ? "Done" : "Select"}</button>`;
+  $("#sel-toggle").addEventListener("click", () => {
+    followSel.on = !followSel.on;
+    if (!followSel.on) followSel.picked.clear();
+    render();
+  });
+  $("#bulk-bar")?.remove();
+  if (!followSel.on) return;
+
+  const bar = document.createElement("div");
+  bar.id = "bulk-bar";
+  bar.className = "bulk-bar";
+  bar.setAttribute("role", "toolbar");
+  bar.setAttribute("aria-label", "Selected accounts");
+  document.body.append(bar);
+  const opts = groups.map((g) => `<option value="${g.id}">${esc(g.name)}</option>`).join("");
+  const paint = () => {
+    const n = followSel.picked.size;
+    bar.innerHTML = `<span class="bulk-n">${n} selected</span>
+      <button class="btn small" id="b-all">${n === accounts.length ? "None" : "All"}</button>
+      ${groups.length ? `<select id="b-add" ${n ? "" : "disabled"} aria-label="Add selected to a group"><option value="">Add to group…</option>${opts}</select>
+        <select id="b-rm" ${n ? "" : "disabled"} aria-label="Remove selected from a group"><option value="">Remove from group…</option>${opts}</select>` : ""}
+      <button class="btn small danger" id="b-unfollow" ${n ? "" : "disabled"}>Unfollow</button>`;
+    $("#b-all", bar).addEventListener("click", () => {
+      if (followSel.picked.size === accounts.length) followSel.picked.clear();
+      else accounts.forEach((a) => followSel.picked.add(a.username));
+      $$(".pick", ul).forEach((c) => (c.checked = followSel.picked.has(c.closest("li").dataset.user)));
+      paint();
+    });
+    for (const [id, action] of [["#b-add", "add_group"], ["#b-rm", "remove_group"]]) {
+      $(id, bar)?.addEventListener("change", async (e) => {
+        const gid = +e.target.value;
+        if (!gid) return;
+        const gname = groups.find((g) => g.id === gid)?.name;
+        try {
+          await api("/api/accounts/bulk", { method: "POST", body: { usernames: [...followSel.picked], action, group_id: gid } });
+          toast(`${action === "add_group" ? "Added" : "Removed"} ${followSel.picked.size} ${action === "add_group" ? "to" : "from"} ${gname}`);
+        } catch (err) { toast(err.message); }
+        render();
+      });
+    }
+    $("#b-unfollow", bar).addEventListener("click", () => {
+      const n = followSel.picked.size;
+      bar.innerHTML = `<span class="bulk-n">Unfollow ${n} account${n === 1 ? "" : "s"}?</span>
+        <button class="btn small" id="b-keep">Keep their posts</button>
+        <button class="btn small danger" id="b-purge">Delete their posts too</button>
+        <button class="btn small" id="b-cancel">Cancel</button>`;
+      $("#b-cancel", bar).addEventListener("click", paint);
+      const go = async (purge) => {
+        try {
+          await api("/api/accounts/bulk", { method: "POST", body: { usernames: [...followSel.picked], action: "unfollow", purge } });
+          toast(`Unfollowed ${n} account${n === 1 ? "" : "s"}${purge ? " and deleted their posts (saved items kept)" : ""}`);
+          followSel.picked.clear(); followSel.on = false;
+        } catch (err) { toast(err.message); }
+        render();
+      };
+      $("#b-keep", bar).addEventListener("click", () => go(false));
+      $("#b-purge", bar).addEventListener("click", () => go(true));
+      $("#b-keep", bar).focus();
+    });
+  };
+  paint();
+
+  // tick a row by its checkbox, or by tapping anywhere on it that isn't a link or button
+  ul.addEventListener("click", (e) => {
+    const li = e.target.closest("li[data-user]");
+    if (!li || (e.target.closest("a, button") && !e.target.classList.contains("pick"))) return;
+    const box = $(".pick", li);
+    if (e.target !== box) { e.preventDefault(); box.checked = !box.checked; }
+    box.checked ? followSel.picked.add(li.dataset.user) : followSel.picked.delete(li.dataset.user);
+    paint();
+  });
 }
 
 async function followingView(seq = renderSeq) {
@@ -546,9 +805,14 @@ async function followingView(seq = renderSeq) {
       <div class="group-list" id="group-list"></div>
       <form class="new-group" id="new-group"><input name="g" placeholder="New group, e.g. Friends" maxlength="30" autocomplete="off" required aria-label="New group name"><button class="btn">${I.plus}Add</button></form>
     </section>
+    <div id="s-banner"></div>
+    <div class="list-head" id="list-head" hidden></div>
     <ul class="people" id="people"><li class="loading"></li></ul>
+    <section class="session-box" id="session"></section>
+    <section class="session-box" id="display">${displayHTML()}</section>
     <div class="status-box" id="status"></div></div>`;
 
+  wireDisplay($("#display"));
   $("#new-group").addEventListener("submit", async (e) => {
     e.preventDefault();
     try {
@@ -570,8 +834,17 @@ async function followingView(seq = renderSeq) {
 
   const [{ accounts }, s, { groups }] = await Promise.all([api("/api/accounts"), api("/api/status"), api("/api/groups")]);
   if (moved(seq)) return;
+  $("#s-banner").innerHTML = sessionBanner(s.session);
+  const sbox = $("#session");
+  sbox.innerHTML = sessionCardHTML(s.session);
+  wireSessionCard(sbox, s.session);
+  if (location.hash === "#/following/session") {
+    sbox.scrollIntoView({ block: "start" });
+    $("input[name=sessionid]", sbox)?.focus({ preventScroll: true });
+  }
   $("#group-list").innerHTML = groups.length
     ? groups.map((g) => `<span class="chip-static">${esc(g.name)} <small>${g.count}</small>
+        ${g.count ? `<a href="/api/zip?group=${g.id}" download title="Download everything saved for this group as a zip" aria-label="Download group ${esc(g.name)} as zip">${I.down}</a>` : ""}
         <button data-del-group="${g.id}" data-name="${esc(g.name)}" aria-label="Delete group ${esc(g.name)}">${I.close}</button></span>`).join("")
     : `<p class="hint">Group accounts (friends, photographers…) to filter the feed and reels by group.</p>`;
   $$("[data-del-group]").forEach((b) => b.addEventListener("click", async () => {
@@ -580,7 +853,9 @@ async function followingView(seq = renderSeq) {
     render();
   }));
   const ul = $("#people");
-  ul.innerHTML = accounts.length ? accounts.map((a) => `<li>
+  ul.classList.toggle("selecting", followSel.on);
+  ul.innerHTML = accounts.length ? accounts.map((a) => `<li data-user="${esc(a.username)}">
+      <input type="checkbox" class="pick" aria-label="Select @${esc(a.username)}" ${followSel.picked.has(a.username) ? "checked" : ""}>
       <a href="#/u/${esc(a.username)}"><img class="avatar" src="${esc(a.avatar || AVATAR_FALLBACK)}" alt=""></a>
       <div class="who">
         <a href="#/u/${esc(a.username)}">${esc(a.username)}</a>${a.busy ? '<span class="dot-busy" title="Refreshing"></span>' : ""}
@@ -591,6 +866,8 @@ async function followingView(seq = renderSeq) {
       </div>
       <button class="btn" data-unfollow="${esc(a.username)}">Unfollow</button>
     </li>`).join("") : `<li>${empty("Not following anyone", "Add a public account above. Peek checks everyone you follow every few hours in the background.")}</li>`;
+
+  if (accounts.length) wireBulk(accounts, groups);
 
   $$(".member", ul).forEach((box) => $$("button", box).forEach((b) => b.addEventListener("click", async () => {
     b.setAttribute("aria-pressed", b.getAttribute("aria-pressed") !== "true");
@@ -611,7 +888,7 @@ async function followingView(seq = renderSeq) {
   const cycle = s.cycle_running ? "A refresh is running now."
     : s.last_cycle ? `Last full refresh ${ago(s.last_cycle)} ago, next around ${nxt}.` : `First full refresh starts ${nxt}.`;
   $("#status").innerHTML = `<b>${s.posts.toLocaleString()}</b> posts saved from <b>${s.following}</b> accounts. ${cycle}<br>
-    ${s.logged_in ? "Stories are on, using your burner session." : "Running logged out, so stories are off. Add a burner session in the server config to turn them on."}
+    ${s.logged_in ? "Stories are on, using your burner session." : "Running logged out, so stories are off. Add a burner session above to turn them on."}
     ${s.paused_until ? `<br><b>Instagram is rate-limiting.</b> Fetching is paused until ${new Date(s.paused_until * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}; saved posts still work.` : ""}`;
 }
 
@@ -679,7 +956,9 @@ async function profileView(username) {
         <button class="btn ${a.followed ? "" : "primary"}" id="follow">${a.followed ? `${I.check}Following` : `${I.plus}Follow`}</button>
         <button class="btn" id="refresh" ${a.busy ? "disabled" : ""}>${I.refresh}${a.busy ? "Fetching" : "Refresh"}</button>
         <a class="btn" href="https://www.instagram.com/${esc(a.username)}/" target="_blank" rel="noopener noreferrer">${I.out}Instagram</a>
+        ${a.cached ? `<a class="btn" href="/api/zip?user=${encodeURIComponent(a.username)}" download title="Every post Peek has saved for this account, plus stories, as one zip">${I.down}Zip</a>` : ""}
       </div>
+      ${sessionBanner(a.session)}
       ${a.last_error ? `<p class="notice">${esc(a.last_error)}</p>` : ""}
       ${a.is_private ? `<p class="notice">This account is private, so only its profile details are visible.</p>` : ""}`;
     $("#follow").addEventListener("click", async () => {
@@ -839,6 +1118,7 @@ async function openPost(key) {
     $(".ov-close", overlay).addEventListener("click", closeOverlay);
     $$(".post-view a[href^='#/u/']", overlay).forEach((a) => a.addEventListener("click", () => hideOverlay()));
     wireCards(overlay);
+    wireLightbox($(".post-view", overlay));
     if (slide != null) {  // opened from a saved photo: start on that photo
       const pos = p.media.filter((m) => m.src).findIndex((m) => m.idx === slide);
       const slides = $(".post-view .slides", overlay);
@@ -895,6 +1175,7 @@ function wirePostSteps(key) {
 }
 
 function hideOverlay() {
+  closeLightbox();
   $$("video", overlay).forEach((v) => v.pause());
   overlay.hidden = true;
   overlay.innerHTML = "";
@@ -907,6 +1188,149 @@ function closeOverlay() {
     if (cameFromApp) history.back();
     else location.hash = "#/";
   } else hideOverlay();
+}
+
+/* ================================================================ lightbox
+   Full-screen photo viewer over the post overlay. Pinch, wheel or double-tap to zoom (up to
+   6x), drag to pan when zoomed, swipe or arrow keys between photos at 1x. Pointer Events
+   only, no library. Transform origin is the image centre, so for a fixed screen point P
+   (relative to the stage centre) zooming s -> s2 moves the offset t to P - (P - t) * s2/s. */
+
+let lightbox = null;
+
+function openLightbox(srcs, start) {
+  const box = document.createElement("div");
+  box.className = "lightbox";
+  box.setAttribute("role", "dialog");
+  box.setAttribute("aria-label", "Photo viewer");
+  box.innerHTML = `<div class="lb-stage"><img alt="" draggable="false"></div>
+    <button class="icon-btn lb-close" aria-label="Close">${I.close}</button>
+    ${srcs.length > 1 ? `<button class="icon-btn lb-nav prev" aria-label="Previous photo">${I.chevL}</button>
+      <button class="icon-btn lb-nav next" aria-label="Next photo">${I.chevR}</button><span class="lb-count"></span>` : ""}
+    <span class="lb-zoom" aria-live="polite"></span>`;
+  document.body.append(box);
+  const stage = $(".lb-stage", box), img = $("img", box);
+  const lb = lightbox = { box, i: start, s: 1, tx: 0, ty: 0 };
+  const MAX = 6;
+
+  const clamp = () => {
+    const W = stage.clientWidth, H = stage.clientHeight;
+    const mx = Math.max(0, (img.offsetWidth * lb.s - W) / 2), my = Math.max(0, (img.offsetHeight * lb.s - H) / 2);
+    lb.tx = Math.max(-mx, Math.min(mx, lb.tx)); lb.ty = Math.max(-my, Math.min(my, lb.ty));
+  };
+  let zoomNote;
+  const paint = (animate = false) => {
+    clamp();
+    img.style.transition = animate ? "transform .18s ease-out" : "none";
+    img.style.transform = `translate(${lb.tx}px, ${lb.ty}px) scale(${lb.s})`;
+    stage.classList.toggle("zoomed", lb.s > 1.01);
+    const z = $(".lb-zoom", box);
+    z.textContent = lb.s > 1.01 ? `${lb.s.toFixed(1)}×` : "";
+    clearTimeout(zoomNote); zoomNote = setTimeout(() => (z.textContent = ""), 900);
+  };
+  // zoom to s2 keeping the screen point (cx, cy) fixed
+  const zoomAt = (s2, cx, cy, animate = false) => {
+    s2 = Math.max(1, Math.min(MAX, s2));
+    const r = stage.getBoundingClientRect();
+    const px = cx - (r.left + r.width / 2), py = cy - (r.top + r.height / 2);
+    lb.tx = px - (px - lb.tx) * (s2 / lb.s); lb.ty = py - (py - lb.ty) * (s2 / lb.s);
+    lb.s = s2;
+    if (s2 === 1) { lb.tx = 0; lb.ty = 0; }
+    paint(animate);
+  };
+  const show = (i) => {
+    lb.i = (i + srcs.length) % srcs.length;
+    lb.s = 1; lb.tx = 0; lb.ty = 0;
+    img.src = srcs[lb.i];
+    paint();
+    const c = $(".lb-count", box);
+    if (c) c.textContent = `${lb.i + 1} / ${srcs.length}`;
+  };
+  lb.step = (d) => srcs.length > 1 && show(lb.i + d);
+  lb.zoomBy = (f) => { const r = stage.getBoundingClientRect(); zoomAt(lb.s * f, r.left + r.width / 2, r.top + r.height / 2, true); };
+  lb.reset = () => { lb.s = 1; lb.tx = 0; lb.ty = 0; paint(true); };
+  show(start);
+
+  // pointers: one = pan (zoomed) or swipe (not zoomed); two = pinch
+  const pts = new Map();
+  let pinch = null, swipe = null, lastTap = 0;
+  stage.addEventListener("pointerdown", (e) => {
+    stage.setPointerCapture(e.pointerId);
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pts.size === 2) {
+      const [a, b] = [...pts.values()];
+      pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), s: lb.s };
+      swipe = null;
+    } else if (pts.size === 1) {
+      swipe = { x: e.clientX, y: e.clientY, tx: lb.tx, ty: lb.ty, moved: false };
+    }
+  });
+  stage.addEventListener("pointermove", (e) => {
+    if (!pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinch && pts.size >= 2) {
+      const [a, b] = [...pts.values()];
+      zoomAt(pinch.s * Math.hypot(a.x - b.x, a.y - b.y) / pinch.d, (a.x + b.x) / 2, (a.y + b.y) / 2);
+    } else if (swipe) {
+      const dx = e.clientX - swipe.x, dy = e.clientY - swipe.y;
+      if (Math.abs(dx) + Math.abs(dy) > 6) swipe.moved = true;
+      if (lb.s > 1.01) { lb.tx = swipe.tx + dx; lb.ty = swipe.ty + dy; paint(); }
+      else img.style.transform = `translate(${dx}px, 0)`;  // follow the finger while swiping
+    }
+  });
+  const up = (e) => {
+    if (!pts.has(e.pointerId)) return;
+    pts.delete(e.pointerId);
+    if (pinch) { if (pts.size < 2) pinch = null; if (!pts.size) swipe = null; return; }
+    if (!swipe) return;
+    const dx = e.clientX - swipe.x, dy = e.clientY - swipe.y;
+    if (lb.s <= 1.01 && swipe.moved) {
+      if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy)) lb.step(dx < 0 ? 1 : -1);
+      else if (dy > 90 && Math.abs(dy) > Math.abs(dx)) closeLightbox();  // swipe down closes
+      else paint(true);
+    } else if (!swipe.moved) {
+      const now = Date.now();
+      if (now - lastTap < 300) { zoomAt(lb.s > 1.01 ? 1 : 2.5, e.clientX, e.clientY, true); lastTap = 0; }
+      else lastTap = now;
+    }
+    swipe = null;
+  };
+  stage.addEventListener("pointerup", up);
+  stage.addEventListener("pointercancel", up);
+  stage.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    zoomAt(lb.s * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0025)), e.clientX, e.clientY);
+  }, { passive: false });
+  img.addEventListener("load", () => paint());
+  $(".lb-close", box).addEventListener("click", closeLightbox);
+  $(".lb-nav.prev", box)?.addEventListener("click", () => lb.step(-1));
+  $(".lb-nav.next", box)?.addEventListener("click", () => lb.step(1));
+  $(".lb-close", box).focus();
+}
+
+function closeLightbox() {
+  lightbox?.box.remove();
+  lightbox = null;
+}
+
+function lightboxKeys(e) {
+  const lb = lightbox;
+  if (e.key === "Escape") closeLightbox();
+  else if (e.key === "ArrowRight") lb.step(1);
+  else if (e.key === "ArrowLeft") lb.step(-1);
+  else if (e.key === "+" || e.key === "=") lb.zoomBy(1.5);
+  else if (e.key === "-") lb.zoomBy(1 / 1.5);
+  else if (e.key === "0") lb.reset();
+  else return;
+  e.preventDefault();
+}
+
+// Tap a photo in the open post to view it full screen (videos keep their own controls).
+function wireLightbox(view) {
+  $$(".slide img", view).forEach((im) => im.addEventListener("click", () => {
+    const photos = $$(".slide img", view).map((x) => x.src);
+    openLightbox(photos, Math.max(0, photos.indexOf(im.src)));
+  }));
 }
 
 /* ================================================================ stories viewer */
@@ -936,7 +1360,7 @@ function showStory() {
   overlay.innerHTML = `<button class="icon-btn ov-close" aria-label="Close stories">${I.close}</button>
     <div class="story">
       <div class="story-media">${it.video
-        ? `<video src="${esc(it.src)}" poster="${esc(it.poster || "")}" playsinline autoplay></video>`
+        ? `<video src="${esc(it.src)}" poster="${esc(it.poster || "")}" playsinline autoplay data-rated></video>`
         : `<img src="${esc(it.src)}" alt="">`}</div>
       <div class="story-top">
         <div class="bars">${g.items.map((_, i) => `<i class="${i < st.ii ? "done" : ""}"><b></b></i>`).join("")}</div>
@@ -946,6 +1370,7 @@ function showStory() {
         </div>
       </div>
       <div class="story-tools">
+        ${it.video ? speedHTML("icon-btn speed story-speed") : ""}
         ${it.video ? `<button class="icon-btn" id="s-mute" aria-label="Toggle sound">${muted ? I.muted : I.sound}</button>` : ""}
         ${st.kind === "highlight"
           ? `<a class="icon-btn" href="${esc(`${it.src}?dl=${encodeURIComponent(`${g.username}_highlight_${it.id}`)}`)}" download aria-label="Download">${I.down}</a>`
@@ -961,9 +1386,8 @@ function showStory() {
   $(".tap.prev", overlay).addEventListener("click", () => stepStory(-1));
   $(".tap.next", overlay).addEventListener("click", () => stepStory(1));
   $(".story-who a", overlay).addEventListener("click", () => closeStories(false));
-  $("#s-mute", overlay)?.addEventListener("click", () => {
-    muted = !muted; video.muted = muted; $("#s-mute", overlay).innerHTML = muted ? I.muted : I.sound;
-  });
+  $("#s-mute", overlay)?.addEventListener("click", toggleMute);
+  wireSpeed(overlay);
 
   // hold to pause
   const story = $(".story", overlay);
@@ -978,7 +1402,23 @@ function showStory() {
   story.addEventListener("touchend", (e) => { if (y0 != null && e.changedTouches[0].clientY - y0 > 90) closeStories(); y0 = null; });
 
   let elapsed = 0, last = performance.now();
+  // Seek on the progress bars: tap or drag on the current one to jump within it, or tap
+  // another to go to that item. The bars area is taller than it looks, for fingers.
+  const bars = $(".bars", overlay);
+  const seekTo = (e, drag) => {
+    const segs = $$("i", bars), x = e.clientX;
+    let j = segs.findIndex((el) => { const r = el.getBoundingClientRect(); return x >= r.left && x <= r.right + 4; });
+    if (j < 0) j = x < segs[0].getBoundingClientRect().left ? 0 : segs.length - 1;
+    if (j !== st.ii) { if (!drag) { st.ii = j; showStory(); } return; }
+    const r = segs[j].getBoundingClientRect(), f = Math.max(0, Math.min(1, (x - r.left) / r.width));
+    if (video) { if (video.duration) video.currentTime = f * video.duration; }
+    else elapsed = f * IMAGE_SECONDS;
+  };
+  bars.addEventListener("pointerdown", (e) => { e.stopPropagation(); bars.setPointerCapture(e.pointerId); seekTo(e, false); });
+  bars.addEventListener("pointermove", (e) => { if (bars.hasPointerCapture(e.pointerId)) seekTo(e, true); });
+  bars.addEventListener("click", (e) => e.stopPropagation());
   if (video) {
+    applyRate(video);
     video.muted = muted;
     video.play().catch(() => { video.muted = true; muted = true; video.play().catch(() => {}); });
     video.addEventListener("ended", () => stepStory(1));
@@ -1064,6 +1504,8 @@ async function render() {
   if (storyState) closeStories(false);
 
   stopPolling();
+  $("#bulk-bar")?.remove();
+  if (route !== "following") { followSel.on = false; followSel.picked.clear(); }
   baseRendered = true;
   baseHash = hash;
   const tab = route === "u" ? "" : route || "feed";
@@ -1092,10 +1534,84 @@ window.addEventListener("hashchange", (e) => {
   render();
 });
 
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && $(".save-menu")) return closeSaveMenu();
-  if (overlay.hidden || storyState) return;
-  if (e.key === "Escape" && $(".save-menu")) return closeSaveMenu();
+/* ================================================================ keyboard
+   One handler, routed to whatever is on top: lightbox, cheatsheet, stories (own handler),
+   the post overlay, then the page. Letters are ignored while typing in a field. */
+
+const KEYS = [
+  ["Anywhere", [["?", "Show or hide these shortcuts"], ["/", "Look up"], ["m", "Sound on or off"]]],
+  ["Feed and Reels", [["j / k", "Next / previous post or reel"], ["o or Enter", "Open it"], ["s", "Save it"], ["Space", "Play or pause (Reels)"]]],
+  ["Open post", [["← / →", "Previous / next photo, then post"], ["↑ / ↓", "Previous / next post"], ["f or Enter", "View photo full screen"], ["s", "Save"], ["Esc", "Close"]]],
+  ["Full-screen photo", [["+ / −", "Zoom in / out"], ["0", "Reset zoom"], ["← / →", "Previous / next photo"], ["Esc", "Close"]]],
+  ["Stories", [["← / →", "Previous / next"], ["Esc", "Close"]]],
+];
+
+function toggleKeys() {
+  const open = $(".keys-sheet");
+  if (open) return open.remove();
+  const box = document.createElement("div");
+  box.className = "keys-sheet";
+  box.setAttribute("role", "dialog");
+  box.setAttribute("aria-label", "Keyboard shortcuts");
+  box.innerHTML = `<div class="keys-card"><div class="keys-head"><h2>Keyboard shortcuts</h2>
+      <button class="icon-btn" aria-label="Close">${I.close}</button></div>
+    ${KEYS.map(([title, rows]) => `<section><h3>${title}</h3><dl>${rows.map(([k, what]) =>
+      `<dt>${k.split(" ").map((p) => (["/", "or"].includes(p) && k !== "/" ? ` ${p} ` : `<kbd>${p}</kbd>`)).join("")}</dt><dd>${what}</dd>`).join("")}</dl></section>`).join("")}</div>`;
+  box.addEventListener("click", (e) => { if (e.target === box || e.target.closest(".icon-btn")) box.remove(); });
+  document.body.append(box);
+  $(".icon-btn", box).focus();
+}
+
+// The post or reel at the top of the screen, and stepping between them.
+function pageItems() {
+  const reels = $("#reels");
+  if (reels) return { reels, items: $$(".reel", reels) };
+  return { items: $$("#cards .card") };
+}
+function currentItem() {
+  const { reels, items } = pageItems();
+  if (reels) return items[Math.round(reels.scrollTop / Math.max(1, reels.clientHeight))];
+  const top = $(".top").offsetHeight;
+  return items.find((el) => el.getBoundingClientRect().bottom > top + 60);
+}
+function stepItem(dir) {
+  const { reels, items } = pageItems();
+  if (!items.length) return;
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+  if (reels) {
+    const i = Math.round(reels.scrollTop / Math.max(1, reels.clientHeight)) + dir;
+    reels.scrollTo({ top: Math.max(0, Math.min(items.length - 1, i)) * reels.clientHeight, behavior: reduce });
+    return;
+  }
+  const top = $(".top").offsetHeight;
+  // cards land 8px below the header (scroll-margin-top), so "this one" sits at top + 8
+  const target = dir > 0
+    ? items.find((el) => el.getBoundingClientRect().top > top + 20)
+    : items.findLast((el) => el.getBoundingClientRect().top < top - 4);
+  if (target) target.scrollIntoView({ block: "start", behavior: reduce });
+  else if (dir < 0) window.scrollTo({ top: 0, behavior: reduce });
+}
+
+function pageKeys(e) {
+  const k = e.key;
+  if ((k === "Enter" || k === " ") && e.target.closest?.("a, button, summary")) return;  // let it activate
+  if (k === "/") { e.preventDefault(); location.hash = "#/search"; return; }
+  if (k === "m") return toggleMute();
+  if (k === "j" || k === "k") { e.preventDefault(); return stepItem(k === "j" ? 1 : -1); }
+  const item = (k === "o" || k === "Enter" || k === "s" || k === " ") && currentItem();
+  if (!item) return;
+  if (k === "o" || k === "Enter") { e.preventDefault(); location.hash = `#/p/${item.dataset.sc}`; }
+  else if (k === "s") {
+    const btn = $("button.save", item);
+    if (btn) btn.click();
+    else { const p = postIndex[item.dataset.sc]; if (p) setSaved(p.shortcode, !p.saved); }
+  } else if (k === " " && item.classList.contains("reel")) {
+    e.preventDefault();
+    const v = $("video", item); v.paused ? v.play().catch(() => {}) : v.pause();
+  }
+}
+
+function postKeys(e) {
   if (e.key === "Escape") return closeOverlay();
   const frame = $(".post-view .frame", overlay);
   if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
@@ -1107,7 +1623,24 @@ document.addEventListener("keydown", (e) => {
   } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
     e.preventDefault();
     goPost(e.key === "ArrowDown" ? 1 : -1);
-  }
+  } else if (e.key === "f" || (e.key === "Enter" && !e.target.closest?.("a, button"))) {
+    const img = frame && $$(".slide", frame)[slidePos(frame).i]?.querySelector("img");
+    if (img) { e.preventDefault(); img.click(); }
+  } else if (e.key === "s") $(".post-view button.save", overlay)?.click();
+  else if (e.key === "m") toggleMute();
+}
+
+document.addEventListener("keydown", (e) => {
+  if (lightbox) return lightboxKeys(e);
+  if (e.key === "Escape" && $(".save-menu")) return closeSaveMenu();
+  if (e.key === "Escape" && $(".keys-sheet")) return toggleKeys();
+  if (storyState) return;  // storyKeys has these
+  const typing = e.target.closest?.("input, textarea, select, [contenteditable='true']");
+  if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === "?") { e.preventDefault(); return toggleKeys(); }
+  if ($(".keys-sheet")) return;
+  if (!overlay.hidden) return postKeys(e);
+  if (!$(".login")) pageKeys(e);
 });
 
 $("#refresh-all").addEventListener("click", async (e) => {
@@ -1120,5 +1653,6 @@ $("#refresh-all").addEventListener("click", async (e) => {
   setTimeout(() => btn.classList.remove("spinning"), 1500);
 });
 
+applyDisplay();
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 render();

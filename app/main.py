@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -47,6 +47,8 @@ async def refresh_cycle():
                 if "Rate limited" in str(e) or "rate-limiting" in str(e):
                     log.warning("backing off for the rest of this cycle")
                     break
+            except Exception:  # one bad account must never stop the scheduler for good
+                log.exception("refresh %s failed unexpectedly", name)
             if i < len(names) - 1:
                 await asyncio.sleep(random.uniform(*ACCOUNT_DELAY))
         await asyncio.to_thread(fetcher.prune_expired_stories)
@@ -76,13 +78,35 @@ async def scheduler():
         await asyncio.sleep(wait)
 
 
+SESSION_CHECK_HOURS = 6
+
+
+async def session_watch():
+    """Check the burner session every few hours, so an expired one shows up in the UI
+    instead of stories and highlights quietly stopping."""
+    await asyncio.sleep(30)
+    while True:
+        try:
+            s = fetcher.session_info()
+            due = (s["configured"] and s["state"] != "dead" and not fetcher.cooldown_until()
+                   and (not s["checked_at"] or time.time() - s["checked_at"] > SESSION_CHECK_HOURS * 3600))
+            if due:
+                s = await asyncio.to_thread(fetcher.test_login)
+                log.info("session check: %s", s["state"])
+        except Exception:
+            log.exception("session check failed")
+        await asyncio.sleep(30 * 60)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init()
+    fetcher.init_session()
     threading.Thread(target=fetcher.hydrator_loop, name="peek-hydrator", daemon=True).start()
-    task = asyncio.create_task(scheduler())
+    tasks = [asyncio.create_task(scheduler()), asyncio.create_task(session_watch())]
     yield
-    task.cancel()
+    for t in tasks:
+        t.cancel()
 
 
 app = FastAPI(title="Peek", lifespan=lifespan)
@@ -224,12 +248,46 @@ def status():
     )
     return {
         "logged_in": fetcher.logged_in(),
+        "session": fetcher.session_info(),
         "paused_until": fetcher.cooldown_until(),
         "password": bool(PEEK_PASSWORD),
         "refresh_hours": REFRESH_HOURS,
         **state,
         **counts,
     }
+
+
+class SessionIn(BaseModel):
+    sessionid: str
+    csrftoken: str | None = None
+    mid: str | None = None
+    ig_did: str | None = None
+    rur: str | None = None
+
+
+@app.get("/api/session")
+def get_session():
+    return fetcher.session_info()
+
+
+@app.post("/api/session")
+async def put_session(body: SessionIn):
+    """Replace the burner session. Saved only if Instagram accepts it."""
+    try:
+        return await asyncio.to_thread(fetcher.set_session, body.model_dump())
+    except fetcher.SessionError as e:
+        raise HTTPException(400 if e.state == "dead" else 503, str(e))
+
+
+@app.post("/api/session/check")
+async def check_session():
+    return await asyncio.to_thread(fetcher.test_login)
+
+
+@app.delete("/api/session")
+async def delete_session():
+    await asyncio.to_thread(fetcher.clear_session)
+    return fetcher.session_info()
 
 
 @app.get("/api/feed")
@@ -398,6 +456,60 @@ def unfollow(username: str, purge: bool = False):
     return {"ok": True}
 
 
+class Bulk(BaseModel):
+    usernames: list[str]
+    action: str                 # unfollow | add_group | remove_group
+    group_id: int | None = None
+    purge: bool = False         # unfollow: also delete what Peek saved for them
+
+
+@app.post("/api/accounts/bulk")
+def bulk(body: Bulk):
+    users = sorted({_clean(u) for u in body.usernames})
+    if not users:
+        raise HTTPException(400, "Pick at least one account")
+    if body.action in ("add_group", "remove_group"):
+        if not db.one("SELECT id FROM groups WHERE id=?", (body.group_id,)):
+            raise HTTPException(404, "That group no longer exists")
+        with db.conn() as c:
+            if body.action == "add_group":
+                c.executemany("INSERT OR IGNORE INTO account_groups VALUES (?,?)", [(u, body.group_id) for u in users])
+            else:
+                c.executemany("DELETE FROM account_groups WHERE username=? AND group_id=?",
+                              [(u, body.group_id) for u in users])
+    elif body.action == "unfollow":
+        for u in users:
+            if body.purge:
+                fetcher.delete_account_media(u)
+            else:
+                db.execute("UPDATE accounts SET followed=0 WHERE username=?", (u,))
+    else:
+        raise HTTPException(400, "Unknown action")
+    return {"ok": True, "count": len(users)}
+
+
+@app.get("/api/zip")
+def zip_download(user: str | None = None, group: int | None = None, videos: bool = True):
+    """Everything Peek has for a profile or a group, as one zip, streamed as it's built."""
+    if user:
+        users, name = [_clean(user)], _clean(user)
+    elif group is not None:
+        g = db.one("SELECT name FROM groups WHERE id=?", (group,))
+        if not g:
+            raise HTTPException(404, "That group no longer exists")
+        users = [r["username"] for r in db.rows("SELECT username FROM account_groups WHERE group_id=? ORDER BY username",
+                                                 (group,))]
+        name = "group-" + "".join(ch if ch.isalnum() else "-" for ch in g["name"].lower()).strip("-")
+    else:
+        raise HTTPException(400, "Say which profile or group")
+    if not users or not db.one(f"SELECT 1 AS x FROM posts WHERE username IN ({','.join('?' * len(users))}) LIMIT 1",
+                               users):
+        raise HTTPException(404, "Peek hasn't saved any posts for that yet")
+    fname = f"peek_{name}_{time.strftime('%Y-%m-%d')}.zip"
+    return StreamingResponse(fetcher.zip_stream(users, videos), media_type="application/zip",
+                             headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
 @app.get("/api/u/{username}")
 def profile(username: str, bg: BackgroundTasks, before: float | None = None, kind: str | None = None):
     """Cached profile + posts. If missing or stale, kicks off a background fetch and
@@ -424,6 +536,8 @@ def profile(username: str, bg: BackgroundTasks, before: float | None = None, kin
     acct["busy"] = busy
     acct["cached"] = db.one("SELECT COUNT(*) AS n FROM posts WHERE username=? AND reels_only=0", (u,))["n"]
     acct["reels_tab"] = fetcher.logged_in()  # the Reels tab listing needs the burner session
+    sess = fetcher.session_info()
+    acct["session"] = {"state": sess["state"], "error": sess["error"]}  # for the expired-session banner
     return {"account": acct, "posts": posts, "next": posts[-1]["taken_at"] if len(posts) == 60 else None}
 
 
