@@ -386,6 +386,24 @@ def force_refresh(username: str, bg: BackgroundTasks):
     return {"ok": True}
 
 
+@app.get("/api/search")
+def search(q: str = ""):
+    """Search what's already saved: account names and post captions. Never touches Instagram."""
+    q = q.strip().lstrip("@")
+    if len(q) < 2:
+        return {"accounts": [], "posts": []}
+    like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    accounts = db.rows(
+        """SELECT a.*, (SELECT MAX(taken_at) FROM posts p WHERE p.username=a.username) AS latest_post
+           FROM accounts a WHERE (a.username LIKE ? ESCAPE '\\' OR a.full_name LIKE ? ESCAPE '\\')
+             AND (a.followed=1 OR a.fetched_at IS NOT NULL)
+           ORDER BY a.followed DESC, a.username LIMIT 10""", (like, like))
+    posts = db.rows(
+        """SELECT p.*, a.avatar, a.full_name FROM posts p LEFT JOIN accounts a ON a.username=p.username
+           WHERE p.caption LIKE ? ESCAPE '\\' ORDER BY p.taken_at DESC LIMIT 60""", (like,))
+    return {"accounts": [_account_out(a) for a in accounts], "posts": _posts_out(posts)}
+
+
 @app.get("/api/saved")
 def saved_list(before: float | None = None, limit: int = 60):
     """Saved posts, most recently saved first. `before` pages by saved_at."""

@@ -363,13 +363,13 @@ function searchView() {
   view.innerHTML = `<div class="page-pad">
     <h1 class="page-title">Look up</h1>
     <form class="lookup" id="lookup">
-      <input name="u" placeholder="Username or profile link" autocomplete="off" autocapitalize="off" spellcheck="false" required aria-label="Username or profile link">
+      <input name="u" type="search" placeholder="Username, profile link, or words from a caption" autocomplete="off" autocapitalize="off" spellcheck="false" required aria-label="Search">
       <button class="btn primary">Open</button>
     </form>
-    <p class="hint">Works for public accounts. A first visit takes a few seconds while Peek fetches and saves their recent posts.</p>
-    <ul class="people" id="recent"></ul>
+    <p class="hint">Typing searches everything Peek has saved. Open looks up any public account on Instagram.</p>
+    <div id="results"></div>
   </div>`;
-  const input = $("#lookup input");
+  const input = $("#lookup input"), results = $("#results");
   input.focus();
   $("#lookup").addEventListener("submit", (e) => {
     e.preventDefault();
@@ -378,8 +378,34 @@ function searchView() {
     if (m) u = m[1];
     if (u) location.hash = `#/u/${encodeURIComponent(u.toLowerCase())}`;
   });
-  const recent = JSON.parse(localStorageGet("peek.recent") || "[]");
-  $("#recent").innerHTML = recent.map((u) => `<li><div class="who"><a href="#/u/${esc(u)}">@${esc(u)}</a><small>Recently viewed</small></div></li>`).join("");
+
+  const showRecent = () => {
+    const recent = JSON.parse(localStorageGet("peek.recent") || "[]");
+    results.innerHTML = recent.length ? `<h2 class="sub">Recently viewed</h2><ul class="people">${
+      recent.map((u) => `<li><div class="who"><a href="#/u/${esc(u)}">@${esc(u)}</a></div></li>`).join("")}</ul>` : "";
+  };
+  let timer, seq = 0;
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    const q = input.value.trim();
+    if (q.length < 2) return showRecent();
+    timer = setTimeout(async () => {
+      const mine = ++seq;
+      const r = await api(`/api/search?q=${encodeURIComponent(q)}`).catch(() => null);
+      if (!r || mine !== seq) return;  // a newer search already started
+      const people = r.accounts.map((a) => `<li>
+          <a href="#/u/${esc(a.username)}"><img class="avatar" src="${esc(a.avatar || AVATAR_FALLBACK)}" alt=""></a>
+          <div class="who"><a href="#/u/${esc(a.username)}">${esc(a.username)}</a>
+            <small>${esc(a.full_name || "")}${a.followed ? `${a.full_name ? ", " : ""}following` : ""}</small></div></li>`).join("");
+      results.innerHTML = (people ? `<h2 class="sub">Accounts</h2><ul class="people">${people}</ul>` : "")
+        + (r.posts.length ? `<h2 class="sub">Posts mentioning “${esc(q)}”</h2>` : "")
+        + (!people && !r.posts.length ? `<p class="hint">Nothing saved matches “${esc(q)}”. Press Open to look the account up on Instagram.</p>` : "");
+      if (r.posts.length) {
+        results.insertAdjacentHTML("beforeend", `<div class="grid search-grid" id="grid">${gridHTML(r.posts)}</div>`);
+      }
+    }, 250);
+  });
+  showRecent();
 }
 
 function localStorageGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
