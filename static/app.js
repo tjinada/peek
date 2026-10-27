@@ -378,9 +378,11 @@ async function profileView(username) {
         <button role="tab" aria-selected="${tab === "posts"}" data-tab="posts">Posts</button>
         <button role="tab" aria-selected="${tab === "reels"}" data-tab="reels">Reels</button>
       </div>
-      ${posts.length ? `<div class="grid">${gridHTML(posts)}</div>`
+      ${posts.length ? `<div class="grid" id="grid">${gridHTML(posts)}</div>`
         : a.busy ? `<div class="loading"></div>`
-        : empty(tab === "reels" ? "No reels saved" : "No posts saved", a.last_error ? "Peek couldn't get posts this time. Try Refresh in a while." : "Nothing here yet.")}`;
+        : empty(tab === "reels" ? "No reels saved" : "No posts saved", a.last_error ? "Peek couldn't get posts this time. Try Refresh in a while." : "Nothing here yet.")}
+      <div class="grid-foot" id="grid-foot"></div>`;
+    if (!a.busy && (posts.length || a.fetched_at)) wireGridFoot(a);
 
     $("#follow").addEventListener("click", async () => {
       if (a.followed) await api(`/api/accounts/${encodeURIComponent(a.username)}`, { method: "DELETE" });
@@ -394,6 +396,55 @@ async function profileView(username) {
       setTimeout(load, 2500);
     });
     $$(".seg button").forEach((b) => b.addEventListener("click", () => { tab = b.dataset.tab; load(); }));
+  };
+
+  const kindQ = () => (tab === "reels" ? "&kind=reels" : "");
+
+  // Older posts come in two layers: pages already cached on the server (free, loaded as
+  // you scroll), then Instagram itself (costs requests, so only on an explicit tap).
+  const wireGridFoot = (a) => {
+    const foot = $("#grid-foot");
+    const appendPage = async () => {
+      const page = await api(`/api/u/${encodeURIComponent(a.username)}?before=${data.next || data.posts.at(-1)?.taken_at || 0}${kindQ()}`);
+      data.posts.push(...page.posts);
+      data.next = page.next;
+      let grid = $("#grid");
+      if (!grid && page.posts.length) { foot.insertAdjacentHTML("beforebegin", `<div class="grid" id="grid"></div>`); grid = $("#grid"); }
+      grid?.insertAdjacentHTML("beforeend", gridHTML(page.posts));
+      return page.posts.length;
+    };
+    const showButton = (msg = "") => {
+      if (a.is_private) { foot.innerHTML = ""; return; }
+      if (a.history_done) {
+        foot.innerHTML = `<p>That's every post from @${esc(a.username)}. ${num(a.cached)} saved.</p>`;
+        return;
+      }
+      foot.innerHTML = `${msg ? `<p class="foot-note">${esc(msg)}</p>` : ""}
+        <button class="btn" id="older">Load older posts</button>
+        <p>${num(a.cached)} of ${num(a.post_count)} posts saved</p>`;
+      $("#older").addEventListener("click", loadOlder);
+    };
+    const loadOlder = async () => {
+      const btn = $("#older");
+      btn.disabled = true; btn.textContent = "Fetching from Instagram";
+      try {
+        const r = await api(`/api/u/${encodeURIComponent(a.username)}/older`, { method: "POST" });
+        a.cached = r.cached; a.history_done = r.done;
+        while (await appendPage() && data.next);   // show everything that just landed
+        showButton(r.note || (r.added ? "" : r.done ? "" : "Instagram didn't return any more posts this time."));
+      } catch (e) {
+        showButton(e.message);
+      }
+    };
+    if (data.next) {
+      foot.innerHTML = `<div class="loading"></div>`;
+      onSentinel(foot, async () => {
+        await appendPage();
+        if (data.next) return true;
+        showButton();
+        return false;
+      });
+    } else showButton();
   };
 
   try { await load(); }

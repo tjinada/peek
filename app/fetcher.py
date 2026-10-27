@@ -2,7 +2,7 @@
 this module maps its objects into the cache and downloads media to disk (Instagram's
 CDN URLs are signed and expire, so a local copy is the only thing that lasts).
 Metadata is stored first; files download in a parallel pool afterwards."""
-import itertools
+import json
 import logging
 import threading
 import time
@@ -16,6 +16,7 @@ from instaloader.exceptions import (
     ProfileNotExistsException,
     QueryReturnedNotFoundException,
 )
+from instaloader.nodeiterator import FrozenNodeIterator
 
 from . import db
 from .config import IG_SESSIONID, IG_USER, MAX_POSTS, MEDIA_DIR
@@ -257,15 +258,38 @@ def _refresh_locked(username: str, with_stories: bool) -> dict:
     new = 0
     note = None
     if not p.is_private or p.followed_by_viewer:
+        acct = db.one("SELECT cursor, history_done FROM accounts WHERE username=?", (username,))
+        first_time = not acct["cursor"] and not acct["history_done"]
+        it, wrap = _walk(p)
+        cached_run = 0
+        reached_end = False
         try:
-            for post in itertools.islice(p.get_posts(), MAX_POSTS):
-                if _store_post(username, post):
-                    new += 1
+            while True:
+                try:
+                    node = next(it)
+                except StopIteration:
+                    reached_end = True
+                    break
+                code, post = _code(node, wrap)
+                if _cached(code):
+                    # Posts come newest-first, but up to 3 pinned posts sit on top out of
+                    # order, so only a run of already-cached posts means we're caught up.
+                    cached_run += 1
+                    if cached_run >= 4:
+                        break
+                    continue
+                cached_run = 0
+                _store_post(username, post or wrap(node))
+                new += 1
+                if new >= MAX_POSTS:
+                    break
         except (LoginRequiredException, ConnectionException, QueryReturnedNotFoundException) as e:
-            # Logged out, pagination past the first page often hits a login wall.
-            # Whatever we got before that is still good.
+            # Logged out, pagination sometimes hits a login wall. What we got is still good.
             note = _friendly(e)
             log.info("%s: stopped early: %s", username, note)
+        if first_time:
+            # remember where the first fetch stopped, so "load older" carries on from there
+            _save_cursor(username, it, reached_end)
 
     stories = 0
     if with_stories and logged_in():
@@ -277,6 +301,97 @@ def _refresh_locked(username: str, with_stories: bool) -> dict:
     if note:
         db.execute("UPDATE accounts SET last_error=? WHERE username=?", (note, username))
     return {"username": username, "new_posts": new, "stories": stories, "note": note}
+
+
+# ---------------------------------------------------------------- walking a profile's posts
+# Instaloader turns every node into a Post as it iterates; logged out that costs one extra
+# request per post (Post.from_shortcode). Swapping in a pass-through wrapper lets us read
+# the shortcode first and only pay for posts we don't already have.
+
+
+def _walk(p: instaloader.Profile):
+    it = p.get_posts()
+    wrap = it._node_wrapper
+    it._node_wrapper = lambda n: n
+    return it, wrap
+
+
+def _code(node: dict, wrap):
+    code = node.get("code") or node.get("shortcode")
+    if code:
+        return code, None
+    post = wrap(node)
+    return post.shortcode, post
+
+
+def _cached(code: str) -> bool:
+    return db.one("SELECT 1 AS x FROM posts WHERE shortcode=?", (code,)) is not None
+
+
+def _save_cursor(username: str, it, done: bool):
+    try:
+        frozen = None if done else json.dumps(it.freeze()._asdict())
+    except Exception as e:  # never let bookkeeping break a fetch
+        log.warning("%s: couldn't save position: %s", username, e)
+        return
+    db.execute("UPDATE accounts SET cursor=?, history_done=? WHERE username=?", (frozen, int(done), username))
+
+
+def load_older(username: str, count: int = 12) -> dict:
+    """Fetch the next `count` uncached posts further back in an account's history,
+    resuming from the saved position. Raises FetchError."""
+    username = username.lower().lstrip("@").strip()
+    with _lock:
+        _busy.add(username)
+        try:
+            res = _load_older_locked(username, count)
+        finally:
+            _busy.discard(username)
+    queue_downloads(username)
+    return res
+
+
+def _load_older_locked(username: str, count: int) -> dict:
+    acct = db.one("SELECT cursor, history_done FROM accounts WHERE username=?", (username,))
+    if acct and acct["history_done"]:
+        return {"added": 0, "done": True, "note": None}
+    try:
+        p = instaloader.Profile.from_username(L.context, username)
+    except ProfileNotExistsException:
+        raise FetchError("Profile doesn't exist")
+    except (LoginRequiredException, ConnectionException) as e:
+        raise FetchError(_friendly(e))
+    if p.is_private and not p.followed_by_viewer:
+        raise FetchError("This account is private")
+
+    it, wrap = _walk(p)
+    if acct and acct["cursor"]:
+        try:
+            it.thaw(FrozenNodeIterator(**json.loads(acct["cursor"])))
+        except Exception as e:
+            # Stale or from a different login state: walk from the top instead. Cached
+            # posts are skipped by shortcode, so that only costs page requests.
+            log.info("%s: saved position unusable (%s); walking from the newest post", username, e)
+            it, wrap = _walk(p)
+
+    added, done, note = 0, False, None
+    try:
+        while added < count:
+            try:
+                node = next(it)
+            except StopIteration:
+                done = True
+                break
+            code, post = _code(node, wrap)
+            if _cached(code):
+                continue
+            _store_post(username, post or wrap(node))
+            added += 1
+    except (LoginRequiredException, ConnectionException, QueryReturnedNotFoundException) as e:
+        note = _friendly(e)
+        log.info("%s: load older stopped: %s", username, note)
+    _save_cursor(username, it, done)
+    return {"added": added, "done": done, "note": note}
 
 
 def _refresh_stories(username: str, userid: int) -> int:

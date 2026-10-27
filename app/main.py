@@ -118,6 +118,8 @@ def _account_out(a: dict) -> dict:
     a["busy"] = fetcher.is_busy(a["username"])
     a["followed"] = bool(a.get("followed"))
     a["is_private"] = bool(a.get("is_private"))
+    a["history_done"] = bool(a.get("history_done"))
+    a.pop("cursor", None)  # internal; can be large
     return a
 
 
@@ -304,7 +306,22 @@ def profile(username: str, bg: BackgroundTasks, before: float | None = None, kin
     posts = _posts_out(db.rows(sql, args))
     acct = _account_out(a) if a else {"username": u, "followed": False}
     acct["busy"] = busy
+    acct["cached"] = db.one("SELECT COUNT(*) AS n FROM posts WHERE username=?", (u,))["n"]
     return {"account": acct, "posts": posts, "next": posts[-1]["taken_at"] if len(posts) == 60 else None}
+
+
+@app.post("/api/u/{username}/older")
+async def load_older(username: str):
+    """Pull the next page of history from Instagram. Blocks until done (a few seconds)."""
+    u = _clean(username)
+    if fetcher.is_busy(u):
+        raise HTTPException(409, "Already fetching this account, try again in a moment")
+    try:
+        res = await asyncio.to_thread(fetcher.load_older, u)
+    except fetcher.FetchError as e:
+        raise HTTPException(502, str(e))
+    res["cached"] = db.one("SELECT COUNT(*) AS n FROM posts WHERE username=?", (u,))["n"]
+    return res
 
 
 @app.post("/api/u/{username}/refresh")

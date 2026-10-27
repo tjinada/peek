@@ -17,7 +17,9 @@ CREATE TABLE IF NOT EXISTS accounts (
     is_private   INTEGER DEFAULT 0,
     followed     INTEGER DEFAULT 0,
     fetched_at   REAL,
-    last_error   TEXT
+    last_error   TEXT,
+    cursor       TEXT,             -- frozen Instaloader iterator: where "load older" resumes
+    history_done INTEGER DEFAULT 0 -- reached the account's oldest post
 );
 CREATE TABLE IF NOT EXISTS posts (
     shortcode  TEXT PRIMARY KEY,
@@ -57,11 +59,11 @@ CREATE TABLE IF NOT EXISTS seen_stories (id TEXT PRIMARY KEY);
 def init():
     with conn() as c:
         c.executescript(SCHEMA)
-        # migrate databases created before media was downloaded lazily
-        cols = {r["name"] for r in c.execute("PRAGMA table_info(media)")}
-        for col in ("url", "poster_url"):
-            if col not in cols:
-                c.execute(f"ALTER TABLE media ADD COLUMN {col} TEXT")
+        # bring databases from earlier versions up to date
+        for table, col, decl in (("media", "url", "TEXT"), ("media", "poster_url", "TEXT"),
+                                 ("accounts", "cursor", "TEXT"), ("accounts", "history_done", "INTEGER DEFAULT 0")):
+            if col not in {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
 
 
 @contextmanager

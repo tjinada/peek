@@ -26,6 +26,9 @@ On a phone, open the page and use "Add to Home Screen" to install it.
 
 - **Following** accounts refresh in the background every `PEEK_REFRESH_HOURS` (±20% jitter),
   one at a time with a 20–60s gap. If Instagram rate-limits, the rest of that cycle is skipped.
+- **Older posts:** each refresh only checks for new posts. To go further back, scroll to the
+  bottom of a profile and tap **Load older posts**; each tap pulls the next 12 from Instagram
+  and remembers where it stopped, so repeated taps walk back through the whole history.
 - **Look up** opens any public profile. A cached profile shows instantly; a stale one is
   re-fetched in the background while you look at the old copy.
 - Media is downloaded when fetched, because Instagram's CDN links expire. Videos are
@@ -36,7 +39,7 @@ On a phone, open the page and use "Add to Home Screen" to install it.
 
 | | Logged out | Burner session |
 |---|---|---|
-| Public posts & reels | Latest ~12 per account | Up to `PEEK_MAX_POSTS` |
+| Public posts & reels | Yes; each new post costs one extra request | Yes, 12 per request |
 | Stories | No | Yes |
 | Risk | Occasional login walls | Burner may get flagged or banned |
 
