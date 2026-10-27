@@ -1,0 +1,10 @@
+services:
+  peek:
+    build: .
+    container_name: peek
+    restart: unless-stopped
+    ports:
+      - "8642:8000"
+    volumes:
+      - ./data:/data
+    env_file: .env
