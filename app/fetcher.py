@@ -313,6 +313,9 @@ def _walk(p: instaloader.Profile):
     it = p.get_posts()
     wrap = it._node_wrapper
     it._node_wrapper = lambda n: n
+    # The "newest post" checker expects Post objects; with raw nodes it would crash.
+    # It only feeds Instaloader's own fast-update bookkeeping, which Peek doesn't use.
+    it._is_first = None
     return it, wrap
 
 
