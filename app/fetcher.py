@@ -3,6 +3,7 @@ this module maps its objects into the cache and downloads media to disk (Instagr
 CDN URLs are signed and expire, so a local copy is the only thing that lasts).
 Metadata is stored first; files download in a parallel pool afterwards."""
 import json
+from pathlib import Path
 import logging
 import random
 import secrets
@@ -201,8 +202,48 @@ def is_busy(username: str) -> bool:
 # ---------------------------------------------------------------- media download
 
 
-def _save(url: str | None, rel: str, force: bool = False) -> str | None:
-    """Download url to MEDIA_DIR/rel unless it's already there. Returns rel or None."""
+_MAGIC = ((b"\xff\xd8\xff", "jpg"), (b"\x89PNG", "png"), (b"GIF8", "gif"))
+MIME = {"jpg": "image/jpeg", "png": "image/png", "gif": "image/gif", "webp": "image/webp",
+        "heic": "image/heic", "mp4": "video/mp4"}
+
+
+def sniff(path: Path) -> str | None:
+    """Real file type from the first bytes. Instagram serves some images as WebP (or HEIC)
+    whatever the URL suggests, so the extension can't be trusted."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(16)
+    except OSError:
+        return None
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "webp"
+    if head[4:8] == b"ftyp":
+        return "heic" if head[8:12] in (b"heic", b"heix", b"mif1", b"msf1") else "mp4"
+    for magic, ext in _MAGIC:
+        if head.startswith(magic):
+            return ext
+    return None
+
+
+def fix_ext(rel: str) -> str:
+    """Rename an image whose extension doesn't match its content. Returns the (new) rel."""
+    path = MEDIA_DIR / rel
+    real = sniff(path)
+    stem, _, ext = rel.rpartition(".")
+    if not real or real == ext or real == "mp4" or ext == "mp4":
+        return rel
+    new = f"{stem}.{real}"
+    try:
+        path.replace(MEDIA_DIR / new)
+    except OSError as e:
+        log.warning("couldn't rename %s: %s", rel, e)
+        return rel
+    return new
+
+
+def _save(url: str | None, rel: str, force: bool = False, fix: bool = False) -> str | None:
+    """Download url to MEDIA_DIR/rel unless it's already there. Returns the saved rel or None.
+    fix=True renames the file to its real extension (rel may come back changed)."""
     if not url:
         return None
     dest = MEDIA_DIR / rel
@@ -217,7 +258,7 @@ def _save(url: str | None, rel: str, force: bool = False) -> str | None:
                 for chunk in r.iter_bytes(1 << 16):
                     f.write(chunk)
         tmp.replace(dest)
-        return rel
+        return fix_ext(rel) if fix else rel
     except Exception as e:  # a missing image shouldn't sink the whole refresh
         log.warning("download failed %s: %s", rel, e)
         tmp.unlink(missing_ok=True)
@@ -439,12 +480,19 @@ def ensure_local(sc: str, idx: int, poster: bool) -> str | None:
     video = bool(row["is_video"])
     col = "poster" if (poster and video) else "path"
     if row[col] and (MEDIA_DIR / row[col]).exists():
-        return row[col]
-    rel = media_rel(row["username"], sc, idx, video, poster)
-    with _file_lock(rel):
-        if not (MEDIA_DIR / rel).exists():
-            if not _save(row["poster_url"] if col == "poster" else row["url"], rel):
-                return None
+        if video or not row[col].endswith(".jpg"):
+            return row[col]
+        rel = row[col]  # saved before extensions were checked: fix it once below
+        with _file_lock(rel):
+            rel = fix_ext(rel)
+    else:
+        rel = media_rel(row["username"], sc, idx, video, poster)
+        with _file_lock(rel):
+            if not (MEDIA_DIR / rel).exists():
+                rel = _save(row["poster_url"] if col == "poster" else row["url"], rel, fix=not video)
+                if not rel:
+                    return None
+    if rel != row[col]:
         if video:
             db.execute(f"UPDATE media SET {col}=? WHERE shortcode=? AND idx=?", (rel, sc, idx))
         else:  # an image is its own poster
@@ -736,7 +784,8 @@ def _refresh_stories(username: str, userid: int) -> int:
             if db.one("SELECT id FROM stories WHERE id=?", (sid,)):
                 continue
             base = f"{username}/stories/{sid}"
-            path = _save(item.video_url if item.is_video else item.url, f"{base}.{'mp4' if item.is_video else 'jpg'}")
+            path = _save(item.video_url if item.is_video else item.url,
+                         f"{base}.{'mp4' if item.is_video else 'jpg'}", fix=not item.is_video)
             poster = _save(item.url, f"{base}_poster.jpg") if item.is_video else path
             db.execute(
                 "INSERT OR REPLACE INTO stories VALUES (?,?,?,?,?,?,?)",

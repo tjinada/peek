@@ -145,15 +145,17 @@ function actionsHTML(p) {
     <span title="Likes">${I.heart}${num(p.likes)}</span>
     <span title="Comments">${I.chat}${num(p.comments)}</span>
     <span class="spacer"></span>
-    ${first ? `<a class="dl" href="${esc(first.src)}" download="${esc(dlName(p, 0))}" title="Download this photo or video" aria-label="Download">${I.down}</a>` : ""}
+    ${first ? `<a class="dl" href="${esc(dlHref(p, 0))}" download title="Download this photo or video" aria-label="Download">${I.down}</a>` : ""}
     <a href="https://www.instagram.com/p/${esc(p.shortcode)}/" target="_blank" rel="noopener noreferrer" title="Open on Instagram">${I.out}</a>
   </div>`;
 }
 
 // e.g. marisol.frames_C0aB12xYz_2.jpg, so carousel slides don't overwrite each other
-function dlName(p, i) {
+// The server names the file and picks the real extension (some "jpg"s are really WebP).
+function dlHref(p, i) {
   const m = p.media[i] || p.media[0];
-  return `${p.username}_${p.shortcode}${p.media.length > 1 ? `_${i + 1}` : ""}.${m?.video ? "mp4" : "jpg"}`;
+  const name = `${p.username}_${p.shortcode}${p.media.length > 1 ? `_${i + 1}` : ""}`;
+  return `${m.src}?dl=${encodeURIComponent(name)}`;
 }
 
 // Point the download link at whichever carousel slide is showing, right before the click goes through.
@@ -164,9 +166,7 @@ function wireDownloads(root, posts) {
     if (!p) return;
     const slides = $(".slides", holder);
     const i = slides ? Math.round(slides.scrollLeft / Math.max(1, slides.clientWidth)) : 0;
-    const m = p.media[i] || p.media[0];
-    a.href = m.src;
-    a.download = dlName(p, i);
+    a.href = dlHref(p, i);
   }));
 }
 const postIndex = {};
@@ -608,7 +608,7 @@ function showStory() {
       </div>
       <div class="story-tools">
         ${it.video ? `<button class="icon-btn" id="s-mute" aria-label="Toggle sound">${muted ? I.muted : I.sound}</button>` : ""}
-        <a class="icon-btn" href="${esc(it.src)}" download="${esc(`${g.username}_story_${it.id}.${it.video ? "mp4" : "jpg"}`)}" aria-label="Download">${I.down}</a>
+        <a class="icon-btn" href="${esc(it.src)}" download="${esc(`${g.username}_story_${it.id}.${it.src.split(".").pop()}`)}" aria-label="Download">${I.down}</a>
       </div>
       <button class="tap prev" aria-label="Previous"></button>
       <button class="tap next" aria-label="Next"></button>

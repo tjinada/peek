@@ -387,8 +387,20 @@ async def refresh_all():
 # ---------------------------------------------------------------- static
 
 
+def _media_response(rel: str, dl: str | None = None) -> FileResponse:
+    """Serve with the real content type (Instagram mixes JPEG and WebP behind .jpg URLs).
+    ?dl=<name> makes it a download named <name>.<real extension>."""
+    path = MEDIA_DIR / rel
+    kind = fetcher.sniff(path) or rel.rsplit(".", 1)[-1]
+    headers = {"Cache-Control": "public, max-age=31536000, immutable"}
+    if dl:
+        safe = "".join(ch for ch in dl if ch.isalnum() or ch in "._-")[:120] or "peek"
+        headers["Content-Disposition"] = f'attachment; filename="{safe}.{kind}"'
+    return FileResponse(path, media_type=fetcher.MIME.get(kind), headers=headers)
+
+
 @app.get("/m/{shortcode}/{name}")
-async def media_file(shortcode: str, name: str):
+async def media_file(shortcode: str, name: str, dl: str | None = None):
     """<idx>.jpg|mp4 = full media, <idx>_poster.jpg = video poster, <idx>_thumb.jpg = small
     grid tile (Instagram's originals are 1-3 MB, far too heavy for a 60-tile grid)."""
     stem = name.rsplit(".", 1)[0]
@@ -403,7 +415,7 @@ async def media_file(shortcode: str, name: str):
         rel = await asyncio.to_thread(fetcher.ensure_local, shortcode, idx, kind == "poster")
     if not rel:
         raise HTTPException(404, "Media unavailable (Instagram link may have expired; refresh the profile)")
-    return FileResponse(MEDIA_DIR / rel, headers={"Cache-Control": "public, max-age=31536000, immutable"})
+    return _media_response(rel, dl)
 
 
 app.mount("/media", StaticFiles(directory=MEDIA_DIR), name="media")
