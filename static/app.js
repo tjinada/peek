@@ -93,6 +93,12 @@ function stepSlides(frame, dir) {
   slides.scrollTo({ left: next * slides.clientWidth, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
 }
 
+function slidePos(frame) {
+  const slides = frame && $(".slides", frame);
+  if (!slides) return { i: 0, n: 1 };
+  return { i: Math.round(slides.scrollLeft / Math.max(1, slides.clientWidth)), n: slides.children.length };
+}
+
 function wireSlides(root) {
   $$(".frame", root).forEach((frame) => {
     const slides = $(".slides", frame), dots = $$(".dots i", frame);
@@ -600,10 +606,54 @@ async function openPost(shortcode) {
     $(".ov-close", overlay).addEventListener("click", closeOverlay);
     $$(".post-view a[href^='#/u/']", overlay).forEach((a) => a.addEventListener("click", () => hideOverlay()));
     wireCards(overlay);
+    wirePostSteps(p.shortcode);
   } catch (e) {
     overlay.innerHTML = `<button class="icon-btn ov-close" aria-label="Close">${I.close}</button>${empty("Post not available", esc(e.message))}`;
     $(".ov-close", overlay).addEventListener("click", closeOverlay);
   }
+}
+
+/* Next/previous post: the list is whatever grid the post was opened from (a profile,
+   Saved, search results), read straight from the page underneath the overlay. */
+function postNeighbours(sc) {
+  const codes = $$('#view a[href^="#/p/"]').map((a) => decodeURIComponent(a.getAttribute("href").slice(4)));
+  const i = codes.indexOf(sc);
+  return i < 0 ? {} : { prev: codes[i - 1], next: codes[i + 1] };
+}
+
+function goPost(dir) {
+  const sc = $(".post-view", overlay)?.dataset.sc;
+  const target = sc && postNeighbours(sc)[dir > 0 ? "next" : "prev"];
+  if (!target) return false;
+  // Keep the grid underneath in step, which also loads the next page when near the end.
+  $(`#view a[href="#/p/${CSS.escape(encodeURIComponent(target))}"], #view a[href="#/p/${CSS.escape(target)}"]`)
+    ?.scrollIntoView({ block: "center" });
+  location.replace(`#/p/${encodeURIComponent(target)}`);
+  return true;
+}
+
+function wirePostSteps(sc) {
+  const nb = postNeighbours(sc);
+  overlay.insertAdjacentHTML("beforeend", `
+    <button class="post-step prev" aria-label="Previous post" ${nb.prev ? "" : "hidden"}>${I.chevL}</button>
+    <button class="post-step next" aria-label="Next post" ${nb.next ? "" : "hidden"}>${I.chevR}</button>`);
+  $(".post-step.prev", overlay).addEventListener("click", () => goPost(-1));
+  $(".post-step.next", overlay).addEventListener("click", () => goPost(1));
+
+  // Swipe past the first/last photo (or on a single photo) to move to the neighbouring post.
+  const frame = $(".post-view .frame", overlay);
+  let x0 = null, y0 = null, startPos = null;
+  frame?.addEventListener("touchstart", (e) => {
+    x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; startPos = slidePos(frame);
+  }, { passive: true });
+  frame?.addEventListener("touchend", (e) => {
+    if (x0 == null) return;
+    const dx = e.changedTouches[0].clientX - x0, dy = e.changedTouches[0].clientY - y0;
+    x0 = null;
+    if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy)) return;
+    if (dx < 0 && startPos.i === startPos.n - 1) goPost(1);
+    else if (dx > 0 && startPos.i === 0) goPost(-1);
+  });
 }
 
 function hideOverlay() {
@@ -798,11 +848,17 @@ window.addEventListener("hashchange", (e) => {
 
 document.addEventListener("keydown", (e) => {
   if (overlay.hidden || storyState) return;
-  if (e.key === "Escape") closeOverlay();
-  else if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
-    // Arrow keys page the open post's photos, wherever focus happens to be
+  if (e.key === "Escape") return closeOverlay();
+  const frame = $(".post-view .frame", overlay);
+  if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+    // Left/Right page the open post's photos, then roll over to the next/previous post.
     e.preventDefault();
-    stepSlides($(".post-view .frame", overlay), e.key === "ArrowRight" ? 1 : -1);
+    const dir = e.key === "ArrowRight" ? 1 : -1, { i, n } = slidePos(frame);
+    if ((dir > 0 && i < n - 1) || (dir < 0 && i > 0)) stepSlides(frame, dir);
+    else goPost(dir);
+  } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    goPost(e.key === "ArrowDown" ? 1 : -1);
   }
 });
 
