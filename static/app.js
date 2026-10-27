@@ -345,74 +345,108 @@ async function profileView(username) {
   stopPolling();
   view.innerHTML = `<div class="loading"></div>`;
   let tab = "posts";
-  let data;
+  let data = null;
+  let a = null;
+  const shown = new Set();
+  const kindQ = () => (tab === "reels" ? "&kind=reels" : "");
+  const url = (extra = "") => `/api/u/${encodeURIComponent(username)}?_=1${kindQ()}${extra}`;
 
-  const load = async () => {
-    data = await api(`/api/u/${encodeURIComponent(username)}${tab === "reels" ? "?kind=reels" : ""}`);
-    paint();
-    if (data.account.busy) {
-      const t = setTimeout(load, 1500);
+  // While a fetch runs we poll, but only the header and any *new* tiles change. Re-rendering
+  // the grid every poll would abort every image mid-download, which is why it looked empty.
+  const poll = async () => {
+    stopPolling();
+    const fresh = await api(url());
+    const wasBusy = a.busy;
+    a = fresh.account;
+    paintHead();
+    const top = data.posts[0]?.taken_at || 0;
+    const newer = fresh.posts.filter((p) => !shown.has(p.shortcode) && p.taken_at > top);
+    if (!data.posts.length && fresh.posts.length) { data = fresh; paintBody(); }
+    else if (newer.length) {
+      data.posts.unshift(...newer);
+      newer.forEach((p) => shown.add(p.shortcode));
+      $("#grid")?.insertAdjacentHTML("afterbegin", gridHTML(newer));
+    }
+    if (a.busy) {
+      const t = setTimeout(poll, 2000);
       stopPolling = () => clearTimeout(t);
+    } else if (wasBusy) {
+      if (!data.posts.length) paintBody(); else wireGridFoot();
     }
   };
 
-  const paint = () => {
-    const a = data.account, posts = data.posts;
+  const open = async () => {
+    stopPolling();
+    data = await api(url());
+    a = data.account;
     rememberRecent(a.username);
-    const fetched = !!a.fetched_at;
-    view.innerHTML = `
-      <section class="profile-head">
-        <img class="big-avatar" src="${esc(a.avatar || AVATAR_FALLBACK)}" alt="">
-        <div><h1>${esc(a.full_name || a.username)}</h1><div class="handle">@${esc(a.username)}${a.busy ? '<span class="dot-busy" title="Fetching"></span>' : ""}</div></div>
-        <div class="stats">${fetched ? `<span><b>${num(a.post_count)}</b> posts</span><span><b>${num(a.followers)}</b> followers</span><span><b>${num(a.following)}</b> following</span>` : ""}</div>
-        ${a.bio ? `<p class="bio">${esc(a.bio)}</p>` : ""}
-        <div class="profile-actions">
-          <button class="btn ${a.followed ? "" : "primary"}" id="follow">${a.followed ? `${I.check}Following` : `${I.plus}Follow`}</button>
-          <button class="btn" id="refresh" ${a.busy ? "disabled" : ""}>${I.refresh}${a.busy ? "Fetching" : "Refresh"}</button>
-          <a class="btn" href="https://www.instagram.com/${esc(a.username)}/" target="_blank" rel="noopener noreferrer">${I.out}Instagram</a>
-        </div>
-        ${a.last_error ? `<p class="notice">${esc(a.last_error)}</p>` : ""}
-        ${a.is_private ? `<p class="notice">This account is private, so only its profile details are visible.</p>` : ""}
-      </section>
+    view.innerHTML = `<section class="profile-head" id="phead"></section>
       <div class="seg" role="tablist">
         <button role="tab" aria-selected="${tab === "posts"}" data-tab="posts">Posts</button>
         <button role="tab" aria-selected="${tab === "reels"}" data-tab="reels">Reels</button>
       </div>
-      ${posts.length ? `<div class="grid" id="grid">${gridHTML(posts)}</div>`
-        : a.busy ? `<div class="loading"></div>`
-        : empty(tab === "reels" ? "No reels saved" : "No posts saved", a.last_error ? "Peek couldn't get posts this time. Try Refresh in a while." : "Nothing here yet.")}
-      <div class="grid-foot" id="grid-foot"></div>`;
-    if (!a.busy && (posts.length || a.fetched_at)) wireGridFoot(a);
+      <div id="pbody"></div>`;
+    $$(".seg button").forEach((b) => b.addEventListener("click", () => { if (b.dataset.tab !== tab) { tab = b.dataset.tab; open(); } }));
+    paintHead();
+    paintBody();
+    if (a.busy) { const t = setTimeout(poll, 2000); stopPolling = () => clearTimeout(t); }
+  };
 
+  const paintHead = () => {
+    const fetched = !!a.fetched_at;
+    $("#phead").innerHTML = `
+      <img class="big-avatar" src="${esc(a.avatar || AVATAR_FALLBACK)}" alt="">
+      <div><h1>${esc(a.full_name || a.username)}</h1><div class="handle">@${esc(a.username)}${a.busy ? '<span class="dot-busy" title="Fetching"></span>' : ""}</div></div>
+      <div class="stats">${fetched ? `<span><b>${num(a.post_count)}</b> posts</span><span><b>${num(a.followers)}</b> followers</span><span><b>${num(a.following)}</b> following</span>` : ""}</div>
+      ${a.bio ? `<p class="bio">${esc(a.bio)}</p>` : ""}
+      <div class="profile-actions">
+        <button class="btn ${a.followed ? "" : "primary"}" id="follow">${a.followed ? `${I.check}Following` : `${I.plus}Follow`}</button>
+        <button class="btn" id="refresh" ${a.busy ? "disabled" : ""}>${I.refresh}${a.busy ? "Fetching" : "Refresh"}</button>
+        <a class="btn" href="https://www.instagram.com/${esc(a.username)}/" target="_blank" rel="noopener noreferrer">${I.out}Instagram</a>
+      </div>
+      ${a.last_error ? `<p class="notice">${esc(a.last_error)}</p>` : ""}
+      ${a.is_private ? `<p class="notice">This account is private, so only its profile details are visible.</p>` : ""}`;
     $("#follow").addEventListener("click", async () => {
       if (a.followed) await api(`/api/accounts/${encodeURIComponent(a.username)}`, { method: "DELETE" });
       else await api("/api/accounts", { method: "POST", body: { username: a.username } });
       toast(a.followed ? `Unfollowed @${a.username}` : `Following @${a.username}`);
-      a.followed = !a.followed; paint();
+      a.followed = !a.followed; paintHead();
     });
     $("#refresh").addEventListener("click", async () => {
       await api(`/api/u/${encodeURIComponent(a.username)}/refresh`, { method: "POST" });
-      a.busy = true; paint();
-      setTimeout(load, 2500);
+      a.busy = true; paintHead();
+      const t = setTimeout(poll, 1500); stopPolling = () => clearTimeout(t);
     });
-    $$(".seg button").forEach((b) => b.addEventListener("click", () => { tab = b.dataset.tab; load(); }));
   };
 
-  const kindQ = () => (tab === "reels" ? "&kind=reels" : "");
+  const paintBody = () => {
+    shown.clear();
+    data.posts.forEach((p) => shown.add(p.shortcode));
+    $("#pbody").innerHTML = data.posts.length
+      ? `<div class="grid" id="grid">${gridHTML(data.posts)}</div><div class="grid-foot" id="grid-foot"></div>`
+      : a.busy ? `<div class="loading"></div>`
+      : `${empty(tab === "reels" ? "No reels saved" : "No posts saved", a.last_error ? "Peek couldn't get posts this time. Try Refresh in a while." : "Nothing here yet.")}<div class="grid-foot" id="grid-foot"></div>`;
+    if (!a.busy) wireGridFoot();
+  };
 
   // Older posts come in two layers: pages already cached on the server (free, loaded as
   // you scroll), then Instagram itself (costs requests, so only on an explicit tap).
-  const wireGridFoot = (a) => {
+  const appendPage = async () => {
+    const before = data.next || data.posts.at(-1)?.taken_at;
+    const page = await api(url(before ? `&before=${before}` : ""));
+    const fresh = page.posts.filter((p) => !shown.has(p.shortcode));
+    fresh.forEach((p) => shown.add(p.shortcode));
+    data.posts.push(...fresh);
+    data.next = page.next;
+    if (!$("#grid") && fresh.length) $("#grid-foot").insertAdjacentHTML("beforebegin", `<div class="grid" id="grid"></div>`);
+    $("#grid")?.insertAdjacentHTML("beforeend", gridHTML(fresh));
+    return fresh.length;
+  };
+
+  const wireGridFoot = () => {
     const foot = $("#grid-foot");
-    const appendPage = async () => {
-      const page = await api(`/api/u/${encodeURIComponent(a.username)}?before=${data.next || data.posts.at(-1)?.taken_at || 0}${kindQ()}`);
-      data.posts.push(...page.posts);
-      data.next = page.next;
-      let grid = $("#grid");
-      if (!grid && page.posts.length) { foot.insertAdjacentHTML("beforebegin", `<div class="grid" id="grid"></div>`); grid = $("#grid"); }
-      grid?.insertAdjacentHTML("beforeend", gridHTML(page.posts));
-      return page.posts.length;
-    };
+    if (!foot) return;
+    const saved = a.post_count ? `${num(a.cached)} of ${num(a.post_count)} posts saved` : `${num(a.cached)} posts saved`;
     const showButton = (msg = "") => {
       if (a.is_private) { foot.innerHTML = ""; return; }
       if (a.history_done) {
@@ -420,8 +454,7 @@ async function profileView(username) {
         return;
       }
       foot.innerHTML = `${msg ? `<p class="foot-note">${esc(msg)}</p>` : ""}
-        <button class="btn" id="older">Load older posts</button>
-        <p>${num(a.cached)} of ${num(a.post_count)} posts saved</p>`;
+        <button class="btn" id="older">Load older posts</button><p>${saved}</p>`;
       $("#older").addEventListener("click", loadOlder);
     };
     const loadOlder = async () => {
@@ -430,8 +463,8 @@ async function profileView(username) {
       try {
         const r = await api(`/api/u/${encodeURIComponent(a.username)}/older`, { method: "POST" });
         a.cached = r.cached; a.history_done = r.done;
-        while (await appendPage() && data.next);   // show everything that just landed
-        showButton(r.note || (r.added ? "" : r.done ? "" : "Instagram didn't return any more posts this time."));
+        while ((await appendPage()) && data.next);   // show everything that just landed
+        showButton(r.note || (r.added || r.done ? "" : "Instagram didn't return any more posts this time."));
       } catch (e) {
         showButton(e.message);
       }
@@ -447,7 +480,7 @@ async function profileView(username) {
     } else showButton();
   };
 
-  try { await load(); }
+  try { await open(); }
   catch (e) { if (e.message !== "auth") view.innerHTML = empty("Couldn't open that profile", esc(e.message)); }
 }
 

@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import instaloader
+from PIL import Image
 from instaloader.exceptions import (
     ConnectionException,
     LoginRequiredException,
@@ -187,6 +188,33 @@ def ensure_local(sc: str, idx: int, poster: bool) -> str | None:
     return rel
 
 
+THUMB_SIZE = (480, 600)
+
+
+def ensure_thumb(sc: str, idx: int) -> str | None:
+    """A ~50 KB JPEG for grid tiles, made once from the poster/image and kept on disk."""
+    src = ensure_local(sc, idx, poster=True)
+    if not src:
+        return None
+    rel = src.rsplit(".", 1)[0].removesuffix("_poster") + "_thumb.jpg"
+    dest = MEDIA_DIR / rel
+    if dest.exists():
+        return rel
+    with _file_lock(rel):
+        if not dest.exists():
+            try:
+                with Image.open(MEDIA_DIR / src) as im:
+                    im = im.convert("RGB")
+                    im.thumbnail(THUMB_SIZE)
+                    tmp = dest.with_suffix(".part")
+                    im.save(tmp, "JPEG", quality=80, optimize=True)
+                    tmp.replace(dest)
+            except Exception as e:
+                log.warning("thumbnail failed %s: %s", rel, e)
+                return src  # fall back to the full image
+    return rel
+
+
 def queue_downloads(username: str):
     """Queue every not-yet-downloaded file for an account: thumbnails first, then the
     rest of the images, then videos."""
@@ -202,9 +230,18 @@ def queue_downloads(username: str):
                 videos.append((r["shortcode"], r["idx"], False))
         elif not r["path"]:
             (first if r["idx"] == 0 else images).append((r["shortcode"], r["idx"], False))
-    for job in first + images + videos:
+    for sc, idx, poster in first:
+        _pool.submit(_safe_thumb, sc, idx)
+    for job in images + videos:
         _pool.submit(_safe_ensure, *job)
     return len(first) + len(images) + len(videos)
+
+
+def _safe_thumb(sc, idx):
+    try:
+        ensure_thumb(sc, idx)
+    except Exception as e:
+        log.warning("thumbnail job %s/%s failed: %s", sc, idx, e)
 
 
 def _safe_ensure(sc, idx, poster):

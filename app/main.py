@@ -148,7 +148,7 @@ def _posts_out(posts: list[dict]) -> list[dict]:
         p = dict(p)
         items = by_code.get(p["shortcode"], [])
         p["media"] = items
-        p["thumb"] = items[0]["poster"] if items else _media_url(p["thumb"])
+        p["thumb"] = f"/m/{p['shortcode']}/0_thumb.jpg" if items else _media_url(p["thumb"])
         if "avatar" in p:
             p["avatar"] = _media_url(p["avatar"])
         out.append(p)
@@ -356,13 +356,18 @@ async def refresh_all():
 
 @app.get("/m/{shortcode}/{name}")
 async def media_file(shortcode: str, name: str):
+    """<idx>.jpg|mp4 = full media, <idx>_poster.jpg = video poster, <idx>_thumb.jpg = small
+    grid tile (Instagram's originals are 1-3 MB, far too heavy for a 60-tile grid)."""
     stem = name.rsplit(".", 1)[0]
-    poster = stem.endswith("_poster")
+    kind = "thumb" if stem.endswith("_thumb") else "poster" if stem.endswith("_poster") else "full"
     try:
-        idx = int(stem.removesuffix("_poster"))
+        idx = int(stem.removesuffix("_thumb").removesuffix("_poster"))
     except ValueError:
         raise HTTPException(404)
-    rel = await asyncio.to_thread(fetcher.ensure_local, shortcode, idx, poster)
+    if kind == "thumb":
+        rel = await asyncio.to_thread(fetcher.ensure_thumb, shortcode, idx)
+    else:
+        rel = await asyncio.to_thread(fetcher.ensure_local, shortcode, idx, kind == "poster")
     if not rel:
         raise HTTPException(404, "Media unavailable (Instagram link may have expired; refresh the profile)")
     return FileResponse(MEDIA_DIR / rel, headers={"Cache-Control": "public, max-age=31536000, immutable"})
