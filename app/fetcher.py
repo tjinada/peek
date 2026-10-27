@@ -947,32 +947,53 @@ def prune_expired_stories(keep_days: int = 7):
 
 
 def delete_account_media(username: str):
-    """Used when unfollowing with purge=true. Saved posts (and the account row they need
-    for the avatar) are kept."""
-    keep = {r["shortcode"] for r in db.rows(
+    """Used when unfollowing with purge=true. Saved posts and saved single photos (and the
+    account row they need for the avatar) are kept; everything else goes."""
+    whole = {r["shortcode"] for r in db.rows(
         "SELECT p.shortcode FROM posts p JOIN saved s ON s.shortcode = p.shortcode WHERE p.username=?", (username,))}
+    slides: dict[str, set[int]] = {}
+    for r in db.rows("SELECT p.shortcode, ss.idx FROM posts p JOIN saved_slides ss ON ss.shortcode = p.shortcode "
+                     "WHERE p.username=?", (username,)):
+        if r["shortcode"] not in whole:
+            slides.setdefault(r["shortcode"], set()).add(r["idx"])
+
+    def kept(name: str) -> bool:
+        # files are <shortcode>_<idx>.<ext>, <shortcode>_<idx>_poster.jpg, <shortcode>_<idx>_thumb.jpg;
+        # shortcodes can contain "_", so match on full prefixes
+        if any(name.startswith(sc + "_") for sc in whole):
+            return True
+        return any(name.startswith(f"{sc}_{i}.") or name.startswith(f"{sc}_{i}_")
+                   for sc, idxs in slides.items() for i in idxs)
+
     folder = MEDIA_DIR / username
     if folder.exists():
         for f in folder.rglob("*"):
-            # shortcodes can contain "_", so match on the "<shortcode>_" prefix
-            if f.is_file() and not any(f.name.startswith(sc + "_") for sc in keep):
+            if f.is_file() and not kept(f.name):
                 f.unlink(missing_ok=True)
+    keep_codes = whole | set(slides)
     with db.conn() as c:
-        c.execute("DELETE FROM media WHERE shortcode IN (SELECT shortcode FROM posts WHERE username=?) "
-                  "AND shortcode NOT IN (SELECT shortcode FROM saved)", (username,))
-        c.execute("DELETE FROM posts WHERE username=? AND shortcode NOT IN (SELECT shortcode FROM saved)", (username,))
+        posts = [r[0] for r in c.execute("SELECT shortcode FROM posts WHERE username=?", (username,))]
+        for sc in posts:
+            if sc in whole:
+                continue
+            if sc in slides:
+                marks = ",".join("?" * len(slides[sc]))
+                c.execute(f"DELETE FROM media WHERE shortcode=? AND idx NOT IN ({marks})", (sc, *slides[sc]))
+            else:
+                c.execute("DELETE FROM media WHERE shortcode=?", (sc,))
+                c.execute("DELETE FROM posts WHERE shortcode=?", (sc,))
         c.execute("DELETE FROM stories WHERE username=?", (username,))
-        if keep:
+        if keep_codes:
             c.execute("UPDATE accounts SET followed=0, cursor=NULL, history_done=0 WHERE username=?", (username,))
         else:
             c.execute("DELETE FROM accounts WHERE username=?", (username,))
-    if not keep:
+    if not keep_codes:
         (MEDIA_DIR / "_avatars" / f"{username}.jpg").unlink(missing_ok=True)
 
 
-def keep_post(sc: str):
-    """A saved post: make sure its details are in and every full-size file is on disk now,
-    before Instagram's links expire."""
+def keep_post(sc: str, only: int | None = None):
+    """A saved post (or one saved photo of it, `only`): make sure its details are in and the
+    full-size files are on disk now, before Instagram's links expire."""
     row = db.one("SELECT username, detailed FROM posts WHERE shortcode=?", (sc,))
     if not row:
         return
@@ -981,7 +1002,7 @@ def keep_post(sc: str):
             hydrate(sc)
         except Exception as e:
             log.warning("save %s: couldn't fetch details yet: %s", sc, e)
-    for m in db.rows("SELECT idx, is_video FROM media WHERE shortcode=?", (sc,)):
+    for m in db.rows("SELECT idx, is_video FROM media WHERE shortcode=? AND (? IS NULL OR idx=?)", (sc, only, only)):
         _pool.submit(_safe_ensure, sc, m["idx"], False)
         if m["is_video"]:
             _pool.submit(_safe_ensure, sc, m["idx"], True)

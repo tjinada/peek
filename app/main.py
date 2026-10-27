@@ -159,13 +159,18 @@ def _posts_out(posts: list[dict]) -> list[dict]:
     for m in media:
         v = bool(m["is_video"])
         by_code.setdefault(m["shortcode"], []).append(
-            {"video": v, "src": _m(m["shortcode"], m["idx"], v, False), "poster": _m(m["shortcode"], m["idx"], v, v)}
+            {"idx": m["idx"], "video": v, "src": _m(m["shortcode"], m["idx"], v, False),
+             "poster": _m(m["shortcode"], m["idx"], v, v)}
         )
     saved = {r["shortcode"] for r in db.rows(f"SELECT shortcode FROM saved WHERE shortcode IN ({marks})", codes)}
+    saved_slides: dict[str, list[int]] = {}
+    for r in db.rows(f"SELECT shortcode, idx FROM saved_slides WHERE shortcode IN ({marks}) ORDER BY idx", codes):
+        saved_slides.setdefault(r["shortcode"], []).append(r["idx"])
     out = []
     for p in posts:
         p = dict(p)
         p["saved"] = p["shortcode"] in saved
+        p["saved_slides"] = saved_slides.get(p["shortcode"], [])
         items = by_code.get(p["shortcode"], [])
         p["media"] = items
         p["thumb"] = f"/m/{p['shortcode']}/0_thumb.jpg" if items or p.get("thumb_url") else _media_url(p["thumb"])
@@ -503,31 +508,57 @@ def search(q: str = ""):
 
 @app.get("/api/saved")
 def saved_list(before: float | None = None, limit: int = 60):
-    """Saved posts, most recently saved first. `before` pages by saved_at."""
+    """Saved posts and saved single photos together, most recently saved first.
+    A single photo comes back as its post with `slide` set. `before` pages by saved_at."""
     limit = max(1, min(limit, 120))
-    rows = db.rows(
-        """SELECT p.*, a.avatar, a.full_name, s.saved_at FROM saved s
-           JOIN posts p ON p.shortcode = s.shortcode
-           LEFT JOIN accounts a ON a.username = p.username
-           WHERE (? IS NULL OR s.saved_at < ?) ORDER BY s.saved_at DESC LIMIT ?""",
-        (before, before, limit))
-    posts = _posts_out(rows)
-    return {"posts": posts, "next": rows[-1]["saved_at"] if len(rows) == limit else None,
-            "count": db.one("SELECT COUNT(*) AS n FROM saved")["n"]}
+    entries = db.rows(
+        """SELECT shortcode, NULL AS slide, saved_at FROM saved WHERE (? IS NULL OR saved_at < ?)
+           UNION ALL
+           SELECT ss.shortcode, ss.idx, ss.saved_at FROM saved_slides ss
+           WHERE (? IS NULL OR ss.saved_at < ?) AND ss.shortcode NOT IN (SELECT shortcode FROM saved)
+           ORDER BY saved_at DESC LIMIT ?""", (before, before, before, before, limit))
+    codes = list({e["shortcode"] for e in entries})
+    marks = ",".join("?" * len(codes)) or "''"
+    posts = {p["shortcode"]: p for p in _posts_out(db.rows(
+        f"""SELECT p.*, a.avatar, a.full_name FROM posts p LEFT JOIN accounts a ON a.username = p.username
+            WHERE p.shortcode IN ({marks})""", codes))}
+    out = []
+    for e in entries:
+        p = posts.get(e["shortcode"])
+        if not p:
+            continue
+        p = dict(p, slide=e["slide"], saved_at=e["saved_at"])
+        if e["slide"] is not None:
+            p["thumb"] = f"/m/{p['shortcode']}/{e['slide']}_thumb.jpg"
+        out.append(p)
+    count = db.one("""SELECT (SELECT COUNT(*) FROM saved) +
+                             (SELECT COUNT(*) FROM saved_slides WHERE shortcode NOT IN (SELECT shortcode FROM saved)) AS n""")["n"]
+    return {"posts": out, "next": entries[-1]["saved_at"] if len(entries) == limit else None, "count": count}
 
 
 @app.post("/api/saved/{shortcode}")
-def save_post(shortcode: str, bg: BackgroundTasks):
+def save_post(shortcode: str, bg: BackgroundTasks, slide: int | None = None):
+    """Save a whole post, or just one photo of a carousel (?slide=<idx>)."""
     if not db.one("SELECT 1 AS x FROM posts WHERE shortcode=?", (shortcode,)):
         raise HTTPException(404, "Post not cached")
-    db.execute("INSERT OR IGNORE INTO saved VALUES (?,?)", (shortcode, time.time()))
-    bg.add_task(fetcher.keep_post, shortcode)
+    with db.conn() as c:
+        if slide is None:
+            c.execute("INSERT OR IGNORE INTO saved VALUES (?,?)", (shortcode, time.time()))
+            c.execute("DELETE FROM saved_slides WHERE shortcode=?", (shortcode,))  # the whole post covers them
+        else:
+            if not c.execute("SELECT 1 FROM media WHERE shortcode=? AND idx=?", (shortcode, slide)).fetchone():
+                raise HTTPException(404, "No such photo in this post")
+            c.execute("INSERT OR IGNORE INTO saved_slides VALUES (?,?,?)", (shortcode, slide, time.time()))
+    bg.add_task(fetcher.keep_post, shortcode, slide)
     return {"saved": True}
 
 
 @app.delete("/api/saved/{shortcode}")
-def unsave_post(shortcode: str):
-    db.execute("DELETE FROM saved WHERE shortcode=?", (shortcode,))
+def unsave_post(shortcode: str, slide: int | None = None):
+    if slide is None:
+        db.execute("DELETE FROM saved WHERE shortcode=?", (shortcode,))
+    else:
+        db.execute("DELETE FROM saved_slides WHERE shortcode=? AND idx=?", (shortcode, slide))
     return {"saved": False}
 
 

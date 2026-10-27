@@ -58,6 +58,12 @@ CREATE TABLE IF NOT EXISTS stories (
 CREATE TABLE IF NOT EXISTS seen_stories (id TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value REAL);
 CREATE TABLE IF NOT EXISTS saved (shortcode TEXT PRIMARY KEY, saved_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS saved_slides (
+    shortcode TEXT NOT NULL,
+    idx       INTEGER NOT NULL,    -- one photo/video of a carousel
+    saved_at  REAL NOT NULL,
+    PRIMARY KEY (shortcode, idx)
+);
 CREATE TABLE IF NOT EXISTS highlights (
     id          TEXT PRIMARY KEY,
     username    TEXT NOT NULL,

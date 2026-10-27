@@ -153,7 +153,7 @@ function actionsHTML(p) {
     <span title="Likes">${I.heart}${num(p.likes)}</span>
     <span title="Comments">${I.chat}${num(p.comments)}</span>
     <span class="spacer"></span>
-    <button class="save${p.saved ? " on" : ""}" data-sc="${esc(p.shortcode)}" aria-pressed="${!!p.saved}" title="${p.saved ? "Remove from Saved" : "Save"}" aria-label="Save">${p.saved ? I.marked : I.mark}</button>
+    <button class="save" data-sc="${esc(p.shortcode)}" aria-label="Save">${I.mark}</button>
     ${first ? `<a class="dl" href="${esc(dlHref(p, 0))}" download title="Download this photo or video" aria-label="Download">${I.down}</a>` : ""}
     <a href="https://www.instagram.com/p/${esc(p.shortcode)}/" target="_blank" rel="noopener noreferrer" title="Open on Instagram">${I.out}</a>
   </div>`;
@@ -195,30 +195,87 @@ function cardHTML(p) {
   </article>`;
 }
 
-// One saved state per post, mirrored on every button showing it (feed card + open post).
-function paintSave(sc, on) {
+// Saved state lives on the post (whole post, plus any single saved photos) and is mirrored
+// on every bookmark showing it (feed card + open post).
+function paintSave(sc) {
+  const p = postIndex[sc];
+  const whole = !!p?.saved, photos = p?.saved_slides?.length || 0;
   $$(`button.save[data-sc="${CSS.escape(sc)}"]`).forEach((b) => {
+    const on = whole || photos > 0;
     b.classList.toggle("on", on);
     b.setAttribute("aria-pressed", on);
-    b.title = on ? "Remove from Saved" : "Save";
+    b.title = whole ? "Saved" : photos ? `${photos} photo${photos > 1 ? "s" : ""} saved` : "Save";
     b.innerHTML = on ? I.marked : I.mark;
   });
 }
 
+// Which photo of the post is showing in the card or viewer that holds this button.
+function currentIdx(btn, p) {
+  const holder = btn.closest(".card, .post-view");
+  const slides = holder && $(".slides", holder);
+  const pos = slides ? Math.round(slides.scrollLeft / Math.max(1, slides.clientWidth)) : 0;
+  const m = p.media.filter((x) => x.src)[pos] || p.media[0];
+  return { idx: m?.idx ?? 0, pos, n: p.media.filter((x) => x.src).length };
+}
+
+async function setSaved(sc, on, slide = null) {
+  const p = postIndex[sc];
+  const before = { saved: p.saved, saved_slides: [...(p.saved_slides || [])] };
+  if (slide == null) { p.saved = on; if (on) p.saved_slides = []; }
+  else p.saved_slides = on ? [...new Set([...(p.saved_slides || []), slide])] : (p.saved_slides || []).filter((i) => i !== slide);
+  paintSave(sc);
+  try {
+    await api(`/api/saved/${encodeURIComponent(sc)}${slide == null ? "" : `?slide=${slide}`}`, { method: on ? "POST" : "DELETE" });
+    toast(on ? (slide == null ? "Post saved" : "Photo saved") : (slide == null ? "Post removed from Saved" : "Photo removed from Saved"));
+  } catch (err) {
+    Object.assign(p, before);
+    paintSave(sc);
+    toast(err.message);
+  }
+}
+
+function closeSaveMenu() { $(".save-menu")?.remove(); }
+
+function openSaveMenu(btn, p) {
+  closeSaveMenu();
+  const { idx, pos, n } = currentIdx(btn, p);
+  const photoSaved = (p.saved_slides || []).includes(idx);
+  const items = p.saved
+    ? [["unsave-post", "Remove post from Saved"]]
+    : [[photoSaved ? "unsave-photo" : "save-photo", photoSaved ? `Remove photo ${pos + 1} of ${n}` : `Save this photo (${pos + 1} of ${n})`],
+       ["save-post", "Save whole post"]];
+  const menu = document.createElement("div");
+  menu.className = "save-menu";
+  menu.setAttribute("role", "menu");
+  menu.innerHTML = items.map(([act, label]) => `<button role="menuitem" data-act="${act}">${esc(label)}</button>`).join("");
+  document.body.append(menu);
+  const r = btn.getBoundingClientRect();
+  const w = menu.offsetWidth, h = menu.offsetHeight;
+  menu.style.left = Math.max(8, Math.min(innerWidth - w - 8, r.right - w)) + "px";
+  menu.style.top = (r.top - h - 6 > 8 ? r.top - h - 6 : r.bottom + 6) + "px";
+  $("button", menu).focus();
+  menu.addEventListener("click", (e) => {
+    const act = e.target.closest("button")?.dataset.act;
+    if (!act) return;
+    closeSaveMenu();
+    if (act === "save-post") setSaved(p.shortcode, true);
+    else if (act === "unsave-post") setSaved(p.shortcode, false);
+    else setSaved(p.shortcode, act === "save-photo", idx);
+  });
+  setTimeout(() => document.addEventListener("pointerdown", (e) => { if (!menu.contains(e.target)) closeSaveMenu(); }, { once: true }));
+}
+
 function wireSaves(root) {
-  $$("button.save", root).forEach((b) => b.addEventListener("click", async (e) => {
-    e.preventDefault(); e.stopPropagation();
-    const sc = b.dataset.sc, on = b.getAttribute("aria-pressed") !== "true";
-    paintSave(sc, on);
-    if (postIndex[sc]) postIndex[sc].saved = on;
-    try {
-      await api(`/api/saved/${encodeURIComponent(sc)}`, { method: on ? "POST" : "DELETE" });
-      toast(on ? "Saved" : "Removed from Saved");
-    } catch (err) {
-      paintSave(sc, !on);
-      toast(err.message);
-    }
-  }));
+  $$("button.save", root).forEach((b) => {
+    paintSave(b.dataset.sc);
+    b.addEventListener("click", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const p = postIndex[b.dataset.sc];
+      if (!p) return;
+      if (p.media.filter((m) => m.src).length > 1) openSaveMenu(b, p);
+      else setSaved(p.shortcode, !p.saved);
+    });
+  });
 }
 
 function wireCards(root) {
@@ -227,10 +284,20 @@ function wireCards(root) {
 }
 
 function gridHTML(posts) {
-  return posts.map((p) => `<a href="#/p/${esc(p.shortcode)}" aria-label="Post from ${ago(p.taken_at)}">
+  return posts.map((p) => {
+    postIndex[p.shortcode] ??= p;
+    if (p.slide != null) {  // one saved photo of a carousel
+      const media = p.media.filter((m) => m.src);
+      const pos = Math.max(0, media.findIndex((m) => m.idx === p.slide));
+      return `<a href="#/p/${esc(p.shortcode)}/${p.slide}" aria-label="Photo ${pos + 1} of ${media.length}, from ${ago(p.taken_at)}">
+        <img src="${esc(p.thumb || "")}" alt="" loading="lazy" decoding="async">
+        <span class="badge count">${pos + 1}/${media.length}</span></a>`;
+    }
+    return `<a href="#/p/${esc(p.shortcode)}" aria-label="Post from ${ago(p.taken_at)}">
       <img src="${esc(p.thumb || "")}" alt="" loading="lazy" decoding="async">
       ${p.kind === "carousel" ? `<span class="badge">${I.carousel}</span>` : p.kind === "reel" || p.kind === "video" ? `<span class="badge">${I.play}</span>` : ""}
-    </a>`).join("");
+    </a>`;
+  }).join("");
 }
 
 function empty(title, body, action = "") {
@@ -260,14 +327,16 @@ function wireGroupBar(root) {
 
 let stopPolling = () => {};
 
-async function feedView() {
+async function feedView(seq = renderSeq) {
   const { gid, html } = await groupBar();
+  if (moved(seq)) return;
   const gq = gid ? `&group=${gid}` : "";
   view.innerHTML = `<div class="strip" id="strip" hidden></div>${html}<div id="cards"><div class="loading"></div></div><div id="more"></div>`;
   wireGroupBar(view);
   loadStrip();
   const cards = $("#cards");
   const first = await api(`/api/feed?_=1${gq}`);
+  if (moved(seq)) return;
   if (!first.posts.length) {
     const s = await api("/api/status");
     cards.innerHTML = gid ? empty("Nothing in this group yet", "Posts from accounts in this group show up here. Add accounts to it on the Following page.")
@@ -323,11 +392,12 @@ async function loadStrip() {
   } catch { /* stories are a bonus; never break the feed */ }
 }
 
-async function reelsView() {
+async function reelsView(seq = renderSeq) {
   view.innerHTML = `<div class="loading"></div>`;
   const { gid, html } = await groupBar();
   const gq = gid ? `&group=${gid}` : "";
   let { posts, next } = await api(`/api/feed?kind=reels&limit=8${gq}`);
+  if (moved(seq)) return;
   if (!posts.length) {
     view.innerHTML = html + empty("No reels yet", gid ? "Reels from accounts in this group land here once they're cached."
       : "Reels and videos from the accounts you follow land here once they're cached.");
@@ -367,16 +437,17 @@ async function reelsView() {
   });
 }
 
-async function savedView() {
+async function savedView(seq = renderSeq) {
   view.innerHTML = `<div class="page-pad page-head"><h1 class="page-title">Saved</h1><p class="hint" id="saved-count"></p></div>
     <div id="saved-body"><div class="loading"></div></div><div id="saved-more"></div>`;
   const first = await api("/api/saved");
+  if (moved(seq)) return;
   const body = $("#saved-body");
   if (!first.posts.length) {
-    body.innerHTML = empty("Nothing saved yet", `Tap the bookmark on any post to keep it here. Saved posts stay on disk even if you unfollow the account.`);
+    body.innerHTML = empty("Nothing saved yet", `Tap the bookmark on any post to keep it here. In a carousel you can save just one photo. Saved items stay on disk even if you unfollow the account.`);
     return;
   }
-  $("#saved-count").textContent = `${first.count.toLocaleString()} saved ${first.count === 1 ? "post" : "posts"}`;
+  $("#saved-count").textContent = `${first.count.toLocaleString()} saved`;
   body.innerHTML = `<div class="grid" id="grid">${gridHTML(first.posts)}</div>`;
   let next = first.next;
   if (next) onSentinel($("#saved-more"), async () => {
@@ -444,7 +515,7 @@ function rememberRecent(u) {
   localStorageSet("peek.recent", JSON.stringify(list.slice(0, 8)));
 }
 
-async function followingView() {
+async function followingView(seq = renderSeq) {
   view.innerHTML = `<div class="page-pad"><h1 class="page-title">Following</h1>
     <form class="lookup" id="add"><input name="u" placeholder="Add a username" autocomplete="off" autocapitalize="off" spellcheck="false" required aria-label="Username to follow"><button class="btn primary">${I.plus}Follow</button></form>
     <section class="groups-box">
@@ -475,6 +546,7 @@ async function followingView() {
   });
 
   const [{ accounts }, s, { groups }] = await Promise.all([api("/api/accounts"), api("/api/status"), api("/api/groups")]);
+  if (moved(seq)) return;
   $("#group-list").innerHTML = groups.length
     ? groups.map((g) => `<span class="chip-static">${esc(g.name)} <small>${g.count}</small>
         <button data-del-group="${g.id}" data-name="${esc(g.name)}" aria-label="Delete group ${esc(g.name)}">${I.close}</button></span>`).join("")
@@ -708,7 +780,9 @@ async function loadHighlights(a) {
 
 /* ================================================================ post overlay */
 
-async function openPost(shortcode) {
+async function openPost(key) {
+  const [shortcode, slideArg] = key.split("/");
+  const slide = slideArg == null || slideArg === "" ? null : +slideArg;
   overlay.hidden = false;
   document.body.style.overflow = "hidden";
   overlay.innerHTML = `<button class="icon-btn ov-close" aria-label="Close">${I.close}</button><div class="loading" style="margin:auto"></div>`;
@@ -717,7 +791,7 @@ async function openPost(shortcode) {
     const p = await api(`/api/p/${encodeURIComponent(shortcode)}`);
     postIndex[p.shortcode] = p;
     overlay.innerHTML = `<button class="icon-btn ov-close" aria-label="Close">${I.close}</button>
-      <div class="post-view" data-sc="${esc(p.shortcode)}">
+      <div class="post-view" data-sc="${esc(p.shortcode)}" data-key="${esc(key)}">
         ${frameHTML(p)}
         <aside>
           <div class="card-head">
@@ -731,7 +805,12 @@ async function openPost(shortcode) {
     $(".ov-close", overlay).addEventListener("click", closeOverlay);
     $$(".post-view a[href^='#/u/']", overlay).forEach((a) => a.addEventListener("click", () => hideOverlay()));
     wireCards(overlay);
-    wirePostSteps(p.shortcode);
+    if (slide != null) {  // opened from a saved photo: start on that photo
+      const pos = p.media.filter((m) => m.src).findIndex((m) => m.idx === slide);
+      const slides = $(".post-view .slides", overlay);
+      if (slides && pos > 0) slides.scrollLeft = pos * slides.clientWidth;
+    }
+    wirePostSteps(key);
   } catch (e) {
     overlay.innerHTML = `<button class="icon-btn ov-close" aria-label="Close">${I.close}</button>${empty("Post not available", esc(e.message))}`;
     $(".ov-close", overlay).addEventListener("click", closeOverlay);
@@ -740,25 +819,25 @@ async function openPost(shortcode) {
 
 /* Next/previous post: the list is whatever grid the post was opened from (a profile,
    Saved, search results), read straight from the page underneath the overlay. */
-function postNeighbours(sc) {
-  const codes = $$('#view a[href^="#/p/"]').map((a) => decodeURIComponent(a.getAttribute("href").slice(4)));
-  const i = codes.indexOf(sc);
-  return i < 0 ? {} : { prev: codes[i - 1], next: codes[i + 1] };
+// Keys are the grid links' targets: "SC" for a post, "SC/idx" for one saved photo.
+function postNeighbours(key) {
+  const keys = $$('#view a[href^="#/p/"]').map((a) => a.getAttribute("href").slice(4));
+  const i = keys.indexOf(key);
+  return i < 0 ? {} : { prev: keys[i - 1], next: keys[i + 1] };
 }
 
 function goPost(dir) {
-  const sc = $(".post-view", overlay)?.dataset.sc;
-  const target = sc && postNeighbours(sc)[dir > 0 ? "next" : "prev"];
+  const key = $(".post-view", overlay)?.dataset.key;
+  const target = key && postNeighbours(key)[dir > 0 ? "next" : "prev"];
   if (!target) return false;
   // Keep the grid underneath in step, which also loads the next page when near the end.
-  $(`#view a[href="#/p/${CSS.escape(encodeURIComponent(target))}"], #view a[href="#/p/${CSS.escape(target)}"]`)
-    ?.scrollIntoView({ block: "center" });
-  location.replace(`#/p/${encodeURIComponent(target)}`);
+  $(`#view a[href="#/p/${CSS.escape(target)}"]`)?.scrollIntoView({ block: "center" });
+  location.replace(`#/p/${target}`);
   return true;
 }
 
-function wirePostSteps(sc) {
-  const nb = postNeighbours(sc);
+function wirePostSteps(key) {
+  const nb = postNeighbours(key);
   overlay.insertAdjacentHTML("beforeend", `
     <button class="post-step prev" aria-label="Previous post" ${nb.prev ? "" : "hidden"}>${I.chevL}</button>
     <button class="post-step next" aria-label="Next post" ${nb.next ? "" : "hidden"}>${I.chevR}</button>`);
@@ -936,13 +1015,16 @@ function showLogin() {
 
 let baseRendered = false;
 let baseHash = null;
+let renderSeq = 0;
+const moved = (seq) => seq !== renderSeq;  // the user switched views while this one was loading
 async function render() {
+  const seq = ++renderSeq;
   const hash = location.hash || "#/";
   const [, route, arg] = hash.split("/");
 
   if (route === "p") {
     if (!baseRendered) { baseRendered = true; baseHash = "#/"; feedView().catch(() => {}); }
-    return openPost(decodeURIComponent(arg));
+    return openPost(hash.slice(4));
   }
   if (!overlay.hidden && !storyState) hideOverlay();
   if (storyState) closeStories(false);
@@ -957,11 +1039,11 @@ async function render() {
 
   try {
     if (route === "u" && arg) await profileView(decodeURIComponent(arg));
-    else if (route === "reels") await reelsView();
+    else if (route === "reels") await reelsView(seq);
     else if (route === "search") searchView();
-    else if (route === "saved") await savedView();
-    else if (route === "following") await followingView();
-    else await feedView();
+    else if (route === "saved") await savedView(seq);
+    else if (route === "following") await followingView(seq);
+    else await feedView(seq);
   } catch (e) {
     if (e.message !== "auth") view.innerHTML = empty("Something went wrong", esc(e.message), `<button class="btn" onclick="location.reload()">Reload</button>`);
   }
@@ -971,13 +1053,15 @@ window.addEventListener("hashchange", (e) => {
   cameFromApp = true;
   const h = location.hash || "#/";
   // A post opens over whatever page is showing; closing it returns to that page untouched.
-  if (h.startsWith("#/p/")) return openPost(decodeURIComponent(h.split("/")[2]));
+  if (h.startsWith("#/p/")) return openPost(h.slice(4));
   if (!overlay.hidden && !storyState && h === baseHash) return hideOverlay();
   render();
 });
 
 document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && $(".save-menu")) return closeSaveMenu();
   if (overlay.hidden || storyState) return;
+  if (e.key === "Escape" && $(".save-menu")) return closeSaveMenu();
   if (e.key === "Escape") return closeOverlay();
   const frame = $(".post-view .frame", overlay);
   if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
