@@ -133,6 +133,11 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 .caption.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
 .caption b { font-weight: 600; margin-right: 6px; }
 
+.caught-up { display: flex; flex-direction: column; align-items: center; gap: 2px; margin: 4px 16px 32px; padding-top: 18px;
+  border-top: 1px solid var(--line); text-align: center; }
+.caught-up span { font: 700 17px/1.2 var(--display); color: var(--safelight); }
+.caught-up small { color: var(--muted); font-size: 13px; }
+
 /* ---------------------------------------------------------------- profile */
 .profile-head { display: grid; grid-template-columns: auto 1fr; gap: 6px 20px; align-items: center; padding: 10px 16px 18px; }
 .profile-head .big-avatar { grid-row: span 2; width: 92px; height: 92px; border-radius: 50%; object-fit: cover; background: var(--surface); }

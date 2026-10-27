@@ -242,7 +242,22 @@ def feed(before: float | None = None, limit: int = 18, kind: str | None = None):
     sql += " ORDER BY p.taken_at DESC LIMIT ?"
     args.append(limit)
     posts = _posts_out(db.rows(sql, args))
-    return {"posts": posts, "next": posts[-1]["taken_at"] if len(posts) == limit else None}
+    out = {"posts": posts, "next": posts[-1]["taken_at"] if len(posts) == limit else None}
+    if before is None:
+        out["seen_at"] = db.get_meta("feed_seen_at")  # newest post shown last time
+    return out
+
+
+class FeedSeen(BaseModel):
+    ts: float
+
+
+@app.post("/api/feed/seen")
+def feed_seen(body: FeedSeen):
+    """Remember the newest feed post shown, for the 'You're caught up' marker. Never goes back."""
+    if body.ts > (db.get_meta("feed_seen_at") or 0):
+        db.set_meta("feed_seen_at", body.ts)
+    return {"ok": True}
 
 
 @app.get("/api/stories")

@@ -255,6 +255,23 @@ async function feedView() {
   }
   cards.innerHTML = first.posts.map(cardHTML).join("");
   wireCards(cards);
+
+  // "You're caught up": a divider above the first post that was already in the feed last time.
+  const seenAt = first.seen_at, newest = first.posts[0].taken_at;
+  let marked = !seenAt || newest <= seenAt;  // nothing new: no marker
+  const placeMarker = () => {
+    if (marked) return;
+    const card = $$(".card", cards).find((c) => (postIndex[c.dataset.sc]?.taken_at ?? 0) <= seenAt);
+    if (!card) return;
+    marked = true;
+    card.insertAdjacentHTML("beforebegin",
+      `<div class="caught-up" role="separator"><span>You're caught up</span><small>Posts below were here last time</small></div>`);
+  };
+  placeMarker();
+  if (!seenAt || newest > seenAt) {
+    setTimeout(() => api("/api/feed/seen", { method: "POST", body: { ts: newest } }).catch(() => {}), 2000);
+  }
+
   let next = first.next;
   if (next) onSentinel($("#more"), async () => {
     const page = await api(`/api/feed?before=${next}`);
@@ -262,6 +279,7 @@ async function feedView() {
     frag.innerHTML = page.posts.map(cardHTML).join("");
     wireCards(frag);
     cards.append(...frag.children);
+    placeMarker();
     next = page.next;
     return !!next;
   });
