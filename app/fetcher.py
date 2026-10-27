@@ -23,7 +23,7 @@ from instaloader.exceptions import (
     QueryReturnedNotFoundException,
     TooManyRequestsException,
 )
-from instaloader.nodeiterator import FrozenNodeIterator
+from instaloader.nodeiterator import FrozenNodeIterator, NodeIterator
 
 from . import db
 from .config import (
@@ -458,7 +458,7 @@ def _small(cands: list | None, want: int = 320) -> str | None:
     return (min if big_enough else max)(pool, key=lambda c: c.get("width") or 0)["url"]
 
 
-def _store_iphone(username: str, node: dict) -> bool:
+def _store_iphone(username: str, node: dict, reels_only: bool = False, detailed: int = 1) -> bool:
     """Store a post straight from the logged-in timeline's data. Going through Instaloader's
     Post here costs a hidden extra request per post (its comment count isn't in this data,
     so it fetches the full post just for that)."""
@@ -481,9 +481,9 @@ def _store_iphone(username: str, node: dict) -> bool:
             "VALUES (?,?,?,NULL,NULL,?,?)", rows)
         c.execute(
             """INSERT OR IGNORE INTO posts (shortcode, username, taken_at, kind, caption, likes, comments,
-                                            thumb_url, detailed) VALUES (?,?,?,?,?,?,?,?,1)""",
+                                            thumb_url, detailed, reels_only) VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (sc, username, float(node["taken_at"]), kind, (node.get("caption") or {}).get("text") or "",
-             node.get("like_count"), node.get("comment_count"), cover))
+             node.get("like_count"), node.get("comment_count"), cover, detailed, int(reels_only)))
     return True
 
 
@@ -742,6 +742,7 @@ def _refresh_locked(username: str, with_stories: bool) -> dict:
                     break
                 code, post = _code(node, wrap)
                 if _cached(code):
+                    _on_grid(code)
                     # Posts come newest-first, but up to 3 pinned posts sit on top out of
                     # order, so only a run of already-cached posts means we're caught up.
                     cached_run += 1
@@ -762,6 +763,13 @@ def _refresh_locked(username: str, with_stories: bool) -> dict:
             # remember where the first fetch stopped, so "load older" carries on from there
             _save_cursor(username, it, reached_end)
 
+    reels = 0
+    if logged_in() and (not p.is_private or p.followed_by_viewer):
+        try:
+            reels = _reels_newest(username, p.userid)
+        except Exception as e:  # posts are what matter; the reels tab is a bonus
+            log.warning("%s: reels tab failed: %s", username, e)
+
     stories = 0
     if with_stories and logged_in():
         try:
@@ -771,7 +779,7 @@ def _refresh_locked(username: str, with_stories: bool) -> dict:
 
     if note:
         db.execute("UPDATE accounts SET last_error=? WHERE username=?", (note, username))
-    return {"username": username, "new_posts": new, "stories": stories, "note": note}
+    return {"username": username, "new_posts": new, "new_reels": reels, "stories": stories, "note": note}
 
 
 # ---------------------------------------------------------------- walking a profile's posts
@@ -802,13 +810,20 @@ def _cached(code: str) -> bool:
     return db.one("SELECT 1 AS x FROM posts WHERE shortcode=?", (code,)) is not None
 
 
-def _save_cursor(username: str, it, done: bool):
+def _on_grid(code: str) -> bool:
+    """A post we first met on the Reels tab turned up on the posts grid too."""
+    with db.conn() as c:
+        return c.execute("UPDATE posts SET reels_only=0 WHERE shortcode=? AND reels_only=1", (code,)).rowcount > 0
+
+
+def _save_cursor(username: str, it, done: bool, tab: str = "posts"):
+    cur, fin = ("cursor", "history_done") if tab == "posts" else ("reels_cursor", "reels_done")
     try:
         frozen = None if done else json.dumps(it.freeze()._asdict())
     except Exception as e:  # never let bookkeeping break a fetch
         log.warning("%s: couldn't save position: %s", username, e)
         return
-    db.execute("UPDATE accounts SET cursor=?, history_done=? WHERE username=?", (frozen, int(done), username))
+    db.execute(f"UPDATE accounts SET {cur}=?, {fin}=? WHERE username=?", (frozen, int(done), username))
 
 
 def load_older(username: str, count: int = 12) -> dict:
@@ -861,6 +876,8 @@ def _load_older_locked(username: str, count: int) -> dict:
                 break
             code, post = _code(node, wrap)
             if _cached(code):
+                if _on_grid(code):
+                    codes.append(code)  # was showing under Reels only; now on the posts grid too
                 continue
             _store_node(username, node, post, wrap)
             codes.append(code)
@@ -870,6 +887,127 @@ def _load_older_locked(username: str, count: int) -> dict:
         note = _friendly(e)
         log.info("%s: load older stopped: %s", username, note)
     _save_cursor(username, it, done)
+    return {"added": added, "done": done, "note": note, "codes": codes}
+
+
+# ---------------------------------------------------------------- the Reels tab
+# Instagram lets people post a reel to their Reels tab only, so it never shows on the posts
+# grid. That tab has its own listing (logged in only). Instaloader's get_reels() turns every
+# entry into a full Post, one extra request per reel; the listing already carries what Peek
+# needs, so it's stored directly and anything missing is filled in by the hydrator.
+
+REELS_DOC_ID = "7845543455542541"  # PolarisProfileReelsTabContentQuery_connection, as in Instaloader
+_EMPTY_PAGE = {"edges": [], "page_info": {"has_next_page": False}}
+
+
+def _reels_iter(username: str, userid: int, frozen: str | None = None):
+    """Iterator over a profile's Reels tab, resumed from `frozen` when given. Resuming
+    starts from an empty first page so it doesn't waste a request on the newest reels."""
+    def make(first=None):
+        return NodeIterator(
+            context=L.context, query_hash=None, doc_id=REELS_DOC_ID,
+            edge_extractor=lambda d: d["data"]["xdt_api__v1__clips__user__connection_v2"],
+            node_wrapper=lambda n: n,
+            query_variables={"data": {"page_size": 12, "include_feed_video": True, "target_user_id": str(userid)}},
+            query_referer=f"https://www.instagram.com/{username}/",
+            first_data=first)
+    if frozen:
+        try:
+            it = make(_EMPTY_PAGE)
+            it.thaw(FrozenNodeIterator(**json.loads(frozen)))
+            return it
+        except Exception as e:
+            log.info("%s: saved reels position unusable (%s); starting from the newest reel", username, e)
+    return make()
+
+
+def _store_reel(username: str, node: dict) -> str | None:
+    """Store one Reels-tab entry. Returns its shortcode if it was new."""
+    m = dict(node.get("media") or node)
+    sc = m.get("code")
+    if not sc or _cached(sc):
+        return None
+    if not m.get("taken_at"):
+        try:
+            m["taken_at"] = ((int(str(m["pk"]).split("_")[0]) >> 23) + IG_EPOCH_MS) / 1000
+        except (KeyError, ValueError, TypeError):
+            m["taken_at"] = time.time()
+    m.setdefault("media_type", 2)
+    m.setdefault("product_type", "clips")
+    complete = bool(m.get("video_versions")) and bool((m.get("image_versions2") or {}).get("candidates"))
+    _store_iphone(username, m, reels_only=True, detailed=int(complete))
+    if not complete:
+        _hydrate_wake.set()  # the background worker fetches the rest
+    return sc
+
+
+def _reels_newest(username: str, userid: int) -> int:
+    """During a refresh: pick up new reels from the top of the Reels tab, stopping once
+    we're into reels we already have. Call with _lock held."""
+    acct = db.one("SELECT reels_cursor, reels_done FROM accounts WHERE username=?", (username,))
+    first_time = not acct["reels_cursor"] and not acct["reels_done"]
+    it = _reels_iter(username, userid)
+    new, cached_run, done = 0, 0, False
+    while True:
+        try:
+            node = next(it)
+        except StopIteration:
+            done = True
+            break
+        if _store_reel(username, node):
+            new += 1
+            cached_run = 0
+            if new >= MAX_POSTS:
+                break
+        else:
+            cached_run += 1  # pinned reels sit on top out of order, so wait for a run
+            if cached_run >= 4:
+                break
+    if first_time:
+        _save_cursor(username, it, done, tab="reels")
+    return new
+
+
+def load_older_reels(username: str, count: int = 12) -> dict:
+    """Fetch the next `count` reels Peek doesn't have yet from an account's Reels tab.
+    Needs the burner session. Raises FetchError."""
+    username = username.lower().lstrip("@").strip()
+    if not logged_in():
+        raise FetchError("Instagram only shows the Reels tab with a login. Add a burner session to load it.")
+    _check_cooldown()
+    with _lock:
+        _busy.add(username)
+        try:
+            res = _load_older_reels_locked(username, count)
+        finally:
+            _busy.discard(username)
+    queue_downloads(username)
+    return res
+
+
+def _load_older_reels_locked(username: str, count: int) -> dict:
+    acct = db.one("SELECT userid, is_private, reels_cursor, reels_done FROM accounts WHERE username=?", (username,))
+    if acct and acct["reels_done"]:
+        return {"added": 0, "done": True, "note": None, "codes": []}
+    if not acct or not acct["userid"]:
+        raise FetchError("Open the profile once first so Peek knows who this is")
+    it = _reels_iter(username, acct["userid"], acct["reels_cursor"])
+    added, done, note, codes = 0, False, None, []
+    try:
+        while added < count:
+            try:
+                node = next(it)
+            except StopIteration:
+                done = True
+                break
+            sc = _store_reel(username, node)
+            if sc:
+                codes.append(sc)
+                added += 1
+    except (LoginRequiredException, ConnectionException, QueryReturnedNotFoundException) as e:
+        note = _friendly(e)
+        log.info("%s: load older reels stopped: %s", username, note)
+    _save_cursor(username, it, done, tab="reels")
     return {"added": added, "done": done, "note": note, "codes": codes}
 
 

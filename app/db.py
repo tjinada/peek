@@ -20,7 +20,9 @@ CREATE TABLE IF NOT EXISTS accounts (
     last_error   TEXT,
     cursor       TEXT,             -- frozen Instaloader iterator: where "load older" resumes
     history_done INTEGER DEFAULT 0, -- reached the account's oldest post
-    tried_at     REAL              -- last fetch attempt, successful or not
+    tried_at     REAL,             -- last fetch attempt, successful or not
+    reels_cursor TEXT,             -- same as cursor, for the account's Reels tab
+    reels_done   INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS posts (
     shortcode  TEXT PRIMARY KEY,
@@ -32,7 +34,8 @@ CREATE TABLE IF NOT EXISTS posts (
     comments   INTEGER,
     thumb      TEXT,
     thumb_url  TEXT,                   -- small cover from the profile page (logged out)
-    detailed   INTEGER DEFAULT 1       -- 0 = stub from the profile page, details not fetched yet
+    detailed   INTEGER DEFAULT 1,      -- 0 = stub from the profile page, details not fetched yet
+    reels_only INTEGER DEFAULT 0       -- 1 = only on the account's Reels tab, not its posts grid
 );
 CREATE INDEX IF NOT EXISTS posts_user_time ON posts(username, taken_at DESC);
 CREATE INDEX IF NOT EXISTS posts_time ON posts(taken_at DESC);
@@ -100,7 +103,9 @@ def init():
         for table, col, decl in (("media", "url", "TEXT"), ("media", "poster_url", "TEXT"),
                                  ("accounts", "cursor", "TEXT"), ("accounts", "history_done", "INTEGER DEFAULT 0"),
                                  ("posts", "thumb_url", "TEXT"), ("posts", "detailed", "INTEGER DEFAULT 1"),
-                                 ("accounts", "tried_at", "REAL"), ("accounts", "highlights_at", "REAL")):
+                                 ("accounts", "tried_at", "REAL"), ("accounts", "highlights_at", "REAL"),
+                                 ("posts", "reels_only", "INTEGER DEFAULT 0"),
+                                 ("accounts", "reels_cursor", "TEXT"), ("accounts", "reels_done", "INTEGER DEFAULT 0")):
             if col not in {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
 

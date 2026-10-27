@@ -416,25 +416,29 @@ def profile(username: str, bg: BackgroundTasks, before: float | None = None, kin
         args.append(before)
     if kind == "reels":
         sql += " AND kind IN ('reel','video')"
+    else:  # the posts grid, as on Instagram: reels shared to the Reels tab only stay off it
+        sql += " AND reels_only=0"
     sql += " ORDER BY taken_at DESC LIMIT 60"
     posts = _posts_out(db.rows(sql, args))
     acct = _account_out(a) if a else {"username": u, "followed": False}
     acct["busy"] = busy
-    acct["cached"] = db.one("SELECT COUNT(*) AS n FROM posts WHERE username=?", (u,))["n"]
+    acct["cached"] = db.one("SELECT COUNT(*) AS n FROM posts WHERE username=? AND reels_only=0", (u,))["n"]
+    acct["reels_tab"] = fetcher.logged_in()  # the Reels tab listing needs the burner session
     return {"account": acct, "posts": posts, "next": posts[-1]["taken_at"] if len(posts) == 60 else None}
 
 
 @app.post("/api/u/{username}/older")
-async def load_older(username: str):
-    """Pull the next page of history from Instagram. Blocks until done (a few seconds)."""
+async def load_older(username: str, kind: str | None = None):
+    """Pull the next page of history (of the posts grid, or with kind=reels the Reels tab)
+    from Instagram. Blocks until done (a few seconds)."""
     u = _clean(username)
     if fetcher.is_busy(u):
         raise HTTPException(409, "Already fetching this account, try again in a moment")
     try:
-        res = await asyncio.to_thread(fetcher.load_older, u)
+        res = await asyncio.to_thread(fetcher.load_older_reels if kind == "reels" else fetcher.load_older, u)
     except fetcher.FetchError as e:
         raise HTTPException(502, str(e))
-    res["cached"] = db.one("SELECT COUNT(*) AS n FROM posts WHERE username=?", (u,))["n"]
+    res["cached"] = db.one("SELECT COUNT(*) AS n FROM posts WHERE username=? AND reels_only=0", (u,))["n"]
     # Hand back the new posts themselves: they aren't always older than what's on screen
     # (pinned posts sit among the newest yet can be years old), so paging by date misses them.
     codes = res.pop("codes", [])

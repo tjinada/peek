@@ -743,9 +743,19 @@ async function profileView(username) {
   const wireGridFoot = () => {
     const foot = $("#grid-foot");
     if (!foot) return;
+    // With the burner session the Reels tab pages through Instagram's own Reels tab, which
+    // also has reels that were never put on the posts grid. Logged out it's grid reels only.
+    const reelsTab = tab === "reels" && a.reels_tab;
     const showButton = (msg = "") => {
       const saved = a.post_count ? `${num(a.cached)} of ${num(a.post_count)} posts saved` : `${num(a.cached)} posts saved`;
       if (a.is_private) { foot.innerHTML = ""; return; }
+      if (reelsTab) {
+        foot.innerHTML = a.reels_done
+          ? `<p>That's every reel from @${esc(a.username)}.</p>`
+          : `${msg ? `<p class="foot-note">${esc(msg)}</p>` : ""}<button class="btn" id="older">Load older reels</button>`;
+        $("#older")?.addEventListener("click", loadOlder);
+        return;
+      }
       if (a.history_done) {
         foot.innerHTML = `<p>That's every post from @${esc(a.username)}. ${num(a.cached)} saved.</p>`;
         return;
@@ -758,10 +768,11 @@ async function profileView(username) {
       const btn = $("#older");
       btn.disabled = true; btn.textContent = "Fetching from Instagram";
       try {
-        const r = await api(`/api/u/${encodeURIComponent(a.username)}/older`, { method: "POST" });
-        a.cached = r.cached; a.history_done = r.done;
-        insertSorted(r.posts.filter((p) => tab !== "reels" || p.kind === "reel" || p.kind === "video"));
-        showButton(r.note || (r.added || r.done ? "" : "Instagram didn't return any more posts this time."));
+        const r = await api(`/api/u/${encodeURIComponent(a.username)}/older${reelsTab ? "?kind=reels" : ""}`, { method: "POST" });
+        a.cached = r.cached;
+        if (reelsTab) a.reels_done = r.done; else a.history_done = r.done;
+        insertSorted(r.posts.filter((p) => tab === "reels" ? p.kind === "reel" || p.kind === "video" : !p.reels_only));
+        showButton(r.note || (r.added || r.done ? "" : `Instagram didn't return any more ${reelsTab ? "reels" : "posts"} this time.`));
       } catch (e) {
         showButton(e.message);
       }
