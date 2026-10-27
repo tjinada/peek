@@ -782,6 +782,79 @@ def _load_older_locked(username: str, count: int) -> dict:
     return {"added": added, "done": done, "note": note, "codes": codes}
 
 
+# ---------------------------------------------------------------- Instagram account search
+# Typeahead for Look up. One request per query, cached for an hour, capped per hour, and
+# never during a rate-limit pause. Needs the burner session: Instagram's search wants a login.
+
+SEARCH_TTL = 3600
+SEARCH_PER_HOUR = 30
+_search_cache: dict[str, tuple[float, list]] = {}
+_search_times: list[float] = []
+_search_pics: dict[str, str] = {}  # username -> profile pic URL from the latest results
+
+
+class SearchUnavailable(Exception):
+    def __init__(self, status: str, msg: str):
+        super().__init__(msg)
+        self.status = status
+
+
+def search_instagram(q: str) -> list[dict]:
+    key = q.lower().strip().lstrip("@")
+    hit = _search_cache.get(key)
+    if hit and time.time() - hit[0] < SEARCH_TTL:
+        return hit[1]
+    if not logged_in():
+        raise SearchUnavailable("off", "Instagram search needs the burner session")
+    if cooldown_until():
+        raise SearchUnavailable("paused", "Suggestions paused while Instagram is rate-limiting")
+    now = time.time()
+    _search_times[:] = [t for t in _search_times if now - t < 3600]
+    if len(_search_times) >= SEARCH_PER_HOUR:
+        raise SearchUnavailable("limit", "Suggestions paused: hourly search limit reached")
+    _search_times.append(now)
+    with _lock:
+        _probe.on = True  # a refused search shouldn't pause everything else
+        try:
+            node = L.context.get_json("web/search/topsearch/",
+                                      params={"context": "blended", "query": key, "include_reel": False, "__a": 1})
+        except Exception as e:
+            raise SearchUnavailable("error", "Instagram refused the search right now" if "429" in str(e)
+                                    else f"Search failed: {str(e)[:120]}")
+        finally:
+            _probe.on = False
+    users = []
+    for item in (node.get("users") or [])[:12]:
+        u = item.get("user") or {}
+        name = (u.get("username") or "").lower()
+        if not name:
+            continue
+        pic = u.get("profile_pic_url")
+        if pic:
+            _search_pics[name] = pic
+        users.append({
+            "username": name,
+            "full_name": u.get("full_name") or "",
+            "verified": bool(u.get("is_verified")),
+            "private": bool(u.get("is_private")),
+            "followers": u.get("follower_count"),
+        })
+    _search_cache[key] = (time.time(), users)
+    return users
+
+
+def search_avatar(username: str) -> str | None:
+    """Profile picture for a search suggestion, downloaded once and kept on disk."""
+    rel = f"_search/{username}.jpg"
+    if (MEDIA_DIR / rel).exists():
+        return rel
+    url = _search_pics.get(username)
+    if not url:
+        return None
+    with _file_lock(rel):
+        return rel if (MEDIA_DIR / rel).exists() else _save(url, rel)
+
+
 # ---------------------------------------------------------------- highlights (burner only)
 HIGHLIGHTS_TTL = 24 * 3600
 
@@ -817,7 +890,8 @@ def refresh_highlights(username: str) -> int:
                 """INSERT INTO highlights (id, username, title, cover_url, position) VALUES (?,?,?,?,?)
                    ON CONFLICT(id) DO UPDATE SET title=excluded.title, cover_url=excluded.cover_url,
                      position=excluded.position""", rows)
-            gone = c.execute(f"SELECT id FROM highlights WHERE username=? AND id NOT IN ({','.join('?' * len(ids)) or "''"})",
+            marks = ",".join("?" * len(ids)) or "''"
+            gone = c.execute(f"SELECT id FROM highlights WHERE username=? AND id NOT IN ({marks})",
                              (username, *ids)).fetchall()
             for (hid,) in gone:
                 c.execute("DELETE FROM highlight_items WHERE highlight_id=?", (hid,))

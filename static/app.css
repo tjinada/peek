@@ -240,6 +240,10 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 @keyframes pulse { 50% { opacity: .25; } }
 .sub { font: 700 15px/1.3 var(--display); margin: 22px 0 4px; color: var(--muted); }
 .search-grid { margin: 8px -16px 0; }
+.tick { display: inline-grid; place-items: center; width: 15px; height: 15px; border-radius: 50%; background: #3897f0;
+  color: #fff; vertical-align: -2px; margin-left: 2px; }
+.tick svg { width: 11px; height: 11px; stroke-width: 3; }
+.loading.small { padding: 16px; }
 input[type="search"]::-webkit-search-cancel-button { filter: grayscale(1); }
 .status-box { margin-top: 26px; padding: 14px 16px; background: var(--surface); border-radius: var(--radius-sm); font-size: 13.5px; color: var(--muted); }
 .status-box b { color: var(--text); font-weight: 600; }

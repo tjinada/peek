@@ -99,7 +99,7 @@ async def auth(request: Request, call_next):
     token = request.cookies.get("peek_auth", "")
     if secrets.compare_digest(token, _token()):
         return await call_next(request)
-    if request.url.path.startswith(("/api/", "/media/", "/m/", "/hl/")):
+    if request.url.path.startswith(("/api/", "/media/", "/m/", "/hl/", "/sa/")):
         return JSONResponse({"detail": "auth"}, status_code=401)
     return await call_next(request)  # the shell loads, then shows the login screen
 
@@ -504,6 +504,35 @@ def search(q: str = ""):
         """SELECT p.*, a.avatar, a.full_name FROM posts p LEFT JOIN accounts a ON a.username=p.username
            WHERE p.caption LIKE ? ESCAPE '\\' ORDER BY p.taken_at DESC LIMIT 60""", (like,))
     return {"accounts": [_account_out(a) for a in accounts], "posts": _posts_out(posts)}
+
+
+@app.get("/api/search/instagram")
+async def search_instagram(q: str = ""):
+    """Account suggestions from Instagram for Look up (burner session only)."""
+    q = q.strip().lstrip("@")
+    if len(q) < 3:
+        return {"status": "ok", "users": []}
+    try:
+        users = await asyncio.to_thread(fetcher.search_instagram, q)
+    except fetcher.SearchUnavailable as e:
+        return {"status": e.status, "message": str(e), "users": []}
+    names = [u["username"] for u in users]
+    marks = ",".join("?" * len(names)) or "''"
+    known = {r["username"]: r for r in db.rows(
+        f"SELECT username, avatar, followed FROM accounts WHERE username IN ({marks})", names)}
+    for u in users:
+        k = known.get(u["username"])
+        u["followed"] = bool(k and k["followed"])
+        u["avatar"] = _media_url(k["avatar"]) if k and k["avatar"] else f"/sa/{u['username']}"
+    return {"status": "ok", "users": users}
+
+
+@app.get("/sa/{username}")
+async def search_avatar(username: str):
+    rel = await asyncio.to_thread(fetcher.search_avatar, _clean(username))
+    if not rel:
+        raise HTTPException(404)
+    return _media_response(rel)
 
 
 @app.get("/api/saved")

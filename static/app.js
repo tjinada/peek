@@ -465,10 +465,11 @@ function searchView() {
       <input name="u" type="search" placeholder="Username, profile link, or words from a caption" autocomplete="off" autocapitalize="off" spellcheck="false" required aria-label="Search">
       <button class="btn primary">Open</button>
     </form>
-    <p class="hint">Typing searches everything Peek has saved. Open looks up any public account on Instagram.</p>
+    <p class="hint">Typing searches what Peek has saved, plus Instagram once you pause. Open goes straight to a username.</p>
     <div id="results"></div>
+    <div id="ig"></div>
   </div>`;
-  const input = $("#lookup input"), results = $("#results");
+  const input = $("#lookup input"), results = $("#results"), ig = $("#ig");
   input.focus();
   $("#lookup").addEventListener("submit", (e) => {
     e.preventDefault();
@@ -483,10 +484,32 @@ function searchView() {
     results.innerHTML = recent.length ? `<h2 class="sub">Recently viewed</h2><ul class="people">${
       recent.map((u) => `<li><div class="who"><a href="#/u/${esc(u)}">@${esc(u)}</a></div></li>`).join("")}</ul>` : "";
   };
+  // Instagram suggestions: only after a pause in typing, one request per pause.
+  let igTimer, igSeq = 0;
+  const suggest = (q) => {
+    clearTimeout(igTimer);
+    const mine = ++igSeq;
+    if (q.replace(/^@/, "").length < 3) { ig.innerHTML = ""; return; }
+    igTimer = setTimeout(async () => {
+      ig.innerHTML = `<h2 class="sub">On Instagram</h2><div class="loading small"></div>`;
+      const r = await api(`/api/search/instagram?q=${encodeURIComponent(q)}`).catch((e) => ({ status: "error", message: e.message, users: [] }));
+      if (mine !== igSeq) return;
+      if (r.status === "off") { ig.innerHTML = ""; return; }
+      if (r.status !== "ok") { ig.innerHTML = `<h2 class="sub">On Instagram</h2><p class="hint">${esc(r.message)}</p>`; return; }
+      ig.innerHTML = `<h2 class="sub">On Instagram</h2>` + (r.users.length ? `<ul class="people">${r.users.map((u) => `<li>
+          <a href="#/u/${esc(u.username)}"><img class="avatar" src="${esc(u.avatar)}" alt="" loading="lazy" onerror="this.src='${AVATAR_FALLBACK}'"></a>
+          <div class="who"><a href="#/u/${esc(u.username)}">${esc(u.username)}${u.verified ? ` <span class="tick" title="Verified">${I.check}</span>` : ""}</a>
+            <small>${[u.full_name && esc(u.full_name), u.followers != null && `${num(u.followers)} followers`,
+              u.private && "private", u.followed && "following"].filter(Boolean).join(" · ")}</small></div></li>`).join("")}</ul>`
+        : `<p class="hint">No accounts found for “${esc(q)}”.</p>`);
+    }, 700);
+  };
+
   let timer, seq = 0;
   input.addEventListener("input", () => {
     clearTimeout(timer);
     const q = input.value.trim();
+    suggest(q);
     if (q.length < 2) return showRecent();
     timer = setTimeout(async () => {
       const mine = ++seq;
@@ -498,7 +521,7 @@ function searchView() {
             <small>${esc(a.full_name || "")}${a.followed ? `${a.full_name ? ", " : ""}following` : ""}</small></div></li>`).join("");
       results.innerHTML = (people ? `<h2 class="sub">Accounts</h2><ul class="people">${people}</ul>` : "")
         + (r.posts.length ? `<h2 class="sub">Posts mentioning “${esc(q)}”</h2>` : "")
-        + (!people && !r.posts.length ? `<p class="hint">Nothing saved matches “${esc(q)}”. Press Open to look the account up on Instagram.</p>` : "");
+        + (!people && !r.posts.length ? `<p class="hint">Nothing saved matches “${esc(q)}”.</p>` : "");
       if (r.posts.length) {
         results.insertAdjacentHTML("beforeend", `<div class="grid search-grid" id="grid">${gridHTML(r.posts)}</div>`);
       }
