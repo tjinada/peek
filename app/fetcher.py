@@ -52,17 +52,37 @@ COOLDOWN_MIN = 15 * 60
 _cooldown_until = 0.0
 
 
+MAX_INLINE_WAIT = 5  # seconds Instaloader may pause between requests while we hold the lock
+
+
 class _PauseOn429(instaloader.RateController):
-    def handle_429(self, query_type: str) -> None:
-        global _cooldown_until
+    """Instaloader's limiter sleeps silently (we run it quiet) whenever it thinks we're near
+    Instagram's limits, for up to ~11 minutes, and it does so inside the request while Peek
+    holds its one Instagram lock. Short waits are fine; anything longer becomes a visible
+    pause instead, and a real 429 pauses everything for COOLDOWN_MIN."""
+
+    def wait_before_query(self, query_type: str) -> None:
         try:
-            wait = max(self.query_waittime(query_type, time.monotonic(), True), COOLDOWN_MIN)
-        except Exception:  # its estimate needs request history; fall back to the minimum
-            wait = COOLDOWN_MIN
-        _cooldown_until = time.time() + wait
-        log.warning("Instagram rate limit hit (%s); pausing Instagram requests until %s",
-                    query_type, time.strftime("%H:%M", time.localtime(_cooldown_until)))
+            wait = self.query_waittime(query_type, time.monotonic(), False)
+        except Exception:
+            wait = 0.0
+        if wait > MAX_INLINE_WAIT:
+            _start_cooldown(wait, f"staying under Instagram's request limits ({query_type})")
+            raise TooManyRequestsException("Paused to stay under Instagram's limits")
+        super().wait_before_query(query_type)
+
+    def handle_429(self, query_type: str) -> None:
+        # Don't use query_waittime here: with untracked=True it also arms Instaloader's own
+        # "earliest next request" timer, which is what caused the silent 11-minute sleeps.
+        _start_cooldown(COOLDOWN_MIN, f"Instagram returned 429 ({query_type})")
         raise TooManyRequestsException("429 Too Many Requests")
+
+
+def _start_cooldown(seconds: float, why: str):
+    global _cooldown_until
+    _cooldown_until = max(_cooldown_until, time.time() + seconds)
+    log.warning("pausing Instagram requests until %s: %s",
+                time.strftime("%H:%M", time.localtime(_cooldown_until)), why)
 
 
 def cooldown_until() -> float | None:
@@ -301,7 +321,7 @@ def hydrator_loop():
             continue
         try:
             hydrate(row["shortcode"])
-            time.sleep(random.uniform(1.5, 3.5))
+            time.sleep(random.uniform(15, 30))  # background work: stay well under the limits
         except Exception as e:
             log.warning("hydrate %s failed: %s; pausing", row["shortcode"], e)
             time.sleep(60)
