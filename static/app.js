@@ -358,7 +358,8 @@ async function followingView() {
   const cycle = s.cycle_running ? "A refresh is running now."
     : s.last_cycle ? `Last full refresh ${ago(s.last_cycle)} ago, next around ${nxt}.` : `First full refresh starts ${nxt}.`;
   $("#status").innerHTML = `<b>${s.posts.toLocaleString()}</b> posts saved from <b>${s.following}</b> accounts. ${cycle}<br>
-    ${s.logged_in ? "Stories are on, using your burner session." : "Running logged out, so stories are off. Add a burner session in the server config to turn them on."}`;
+    ${s.logged_in ? "Stories are on, using your burner session." : "Running logged out, so stories are off. Add a burner session in the server config to turn them on."}
+    ${s.paused_until ? `<br><b>Instagram is rate-limiting.</b> Fetching is paused until ${new Date(s.paused_until * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}; saved posts still work.` : ""}`;
 }
 
 async function profileView(username) {

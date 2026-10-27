@@ -42,7 +42,7 @@ async def refresh_cycle():
                 log.info("refreshed %s: %s", name, res)
             except fetcher.FetchError as e:
                 log.warning("refresh %s failed: %s", name, e)
-                if "Rate limited" in str(e):
+                if "Rate limited" in str(e) or "rate-limiting" in str(e):
                     log.warning("backing off for the rest of this cycle")
                     break
             if i < len(names) - 1:
@@ -202,6 +202,7 @@ def status():
     )
     return {
         "logged_in": fetcher.logged_in(),
+        "paused_until": fetcher.cooldown_until(),
         "password": bool(PEEK_PASSWORD),
         "refresh_hours": REFRESH_HOURS,
         **state,

@@ -18,6 +18,7 @@ from instaloader.exceptions import (
     LoginRequiredException,
     ProfileNotExistsException,
     QueryReturnedNotFoundException,
+    TooManyRequestsException,
 )
 from instaloader.nodeiterator import FrozenNodeIterator
 
@@ -42,6 +43,38 @@ class FetchError(Exception):
     pass
 
 
+# ---------------------------------------------------------------- rate limits
+# Instaloader's own reaction to a 429 is to sleep 10+ minutes inside the request. Here that
+# would hold the global lock, freezing every refresh, hydration and "load older" while the
+# UI spins. Instead: fail fast, and pause all Instagram API calls until the window passes.
+
+COOLDOWN_MIN = 15 * 60
+_cooldown_until = 0.0
+
+
+class _PauseOn429(instaloader.RateController):
+    def handle_429(self, query_type: str) -> None:
+        global _cooldown_until
+        try:
+            wait = max(self.query_waittime(query_type, time.monotonic(), True), COOLDOWN_MIN)
+        except Exception:  # its estimate needs request history; fall back to the minimum
+            wait = COOLDOWN_MIN
+        _cooldown_until = time.time() + wait
+        log.warning("Instagram rate limit hit (%s); pausing Instagram requests until %s",
+                    query_type, time.strftime("%H:%M", time.localtime(_cooldown_until)))
+        raise TooManyRequestsException("429 Too Many Requests")
+
+
+def cooldown_until() -> float | None:
+    return _cooldown_until if _cooldown_until > time.time() else None
+
+
+def _check_cooldown():
+    if _cooldown_until > time.time():
+        raise FetchError("Instagram is rate-limiting requests; paused until "
+                         + time.strftime("%H:%M", time.localtime(_cooldown_until)))
+
+
 def _make_loader() -> instaloader.Instaloader:
     L = instaloader.Instaloader(
         download_pictures=False,
@@ -53,6 +86,7 @@ def _make_loader() -> instaloader.Instaloader:
         max_connection_attempts=2,
         request_timeout=30,
         user_agent=UA,
+        rate_controller=_PauseOn429,
     )
     # A bad session must never stop the app from starting: fall back to logged out.
     try:
@@ -80,7 +114,7 @@ def _make_loader_plain() -> instaloader.Instaloader:
     return instaloader.Instaloader(
         download_pictures=False, download_videos=False, download_video_thumbnails=False,
         save_metadata=False, compress_json=False, quiet=True, max_connection_attempts=2,
-        request_timeout=30, user_agent=UA,
+        request_timeout=30, user_agent=UA, rate_controller=_PauseOn429,
     )
 
 
@@ -99,6 +133,8 @@ def _get_profile(username: str) -> instaloader.Profile:
         log.info("%s: not on the public page; trying the profile API with the session", username)
         try:
             data = L.context.get_json("api/v1/users/web_profile_info/", params={"username": username})
+        except TooManyRequestsException:
+            raise
         except Exception as e:
             log.warning("%s: profile API lookup failed: %s", username, e)
             raise ProfileNotExistsException(f"Profile {username} does not exist.") from e
@@ -233,6 +269,7 @@ def hydrate(sc: str) -> bool:
     row = db.one("SELECT username, detailed FROM posts WHERE shortcode=?", (sc,))
     if not row or row["detailed"] == 1:
         return bool(row)
+    _check_cooldown()
     with _lock:
         if db.one("SELECT detailed FROM posts WHERE shortcode=?", (sc,))["detailed"] == 1:
             return True
@@ -259,12 +296,15 @@ def hydrator_loop():
             _hydrate_wake.clear()
             _hydrate_wake.wait(300)
             continue
+        if cooldown_until():
+            time.sleep(max(5, _cooldown_until - time.time()))
+            continue
         try:
             hydrate(row["shortcode"])
             time.sleep(random.uniform(1.5, 3.5))
         except Exception as e:
             log.warning("hydrate %s failed: %s; pausing", row["shortcode"], e)
-            time.sleep(300 if "429" in str(e) or "wait" in str(e).lower() else 60)
+            time.sleep(60)
 
 
 # ---------------------------------------------------------------- media pool
@@ -396,6 +436,7 @@ def refresh_profile(username: str, with_stories: bool = True) -> dict:
     """Fetch profile + recent posts (+ stories when logged in). Raises FetchError.
     Returns once metadata is cached; media keeps downloading in the background."""
     username = username.lower().lstrip("@").strip()
+    _check_cooldown()
     with _lock:
         _busy.add(username)
         db.execute("INSERT INTO accounts (username, tried_at) VALUES (?,?) "
@@ -524,6 +565,7 @@ def load_older(username: str, count: int = 12) -> dict:
     """Fetch the next `count` uncached posts further back in an account's history,
     resuming from the saved position. Raises FetchError."""
     username = username.lower().lstrip("@").strip()
+    _check_cooldown()
     with _lock:
         _busy.add(username)
         try:
@@ -609,8 +651,10 @@ def _friendly(e: Exception) -> str:
     s = str(e)
     if "401" in s or "login" in s.lower():
         return "Instagram wants a login for more (add a burner session for full history)"
-    if "429" in s or "Please wait" in s:
-        return "Rate limited by Instagram — will retry on the next refresh"
+    if isinstance(e, TooManyRequestsException) or "429" in s or "Please wait" in s:
+        until = cooldown_until()
+        return ("Rate limited by Instagram; paused until " + time.strftime("%H:%M", time.localtime(until))
+                if until else "Rate limited by Instagram; try again later")
     if "Redirected to login" in s:
         return "Instagram showed a login wall — try again later"
     return s[:200]
