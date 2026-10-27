@@ -29,6 +29,8 @@ const I = {
   down: '<svg viewBox="0 0 24 24"><path d="M12 4v11m0 0l-4.5-4.5M12 15l4.5-4.5M5 20h14"/></svg>',
   out: '<svg viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>',
   close: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+  chevL: '<svg viewBox="0 0 24 24"><path d="M14.5 6l-6 6 6 6"/></svg>',
+  chevR: '<svg viewBox="0 0 24 24"><path d="M9.5 6l6 6-6 6"/></svg>',
   muted: '<svg viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4zM16 9.5l5 5M21 9.5l-5 5"/></svg>',
   sound: '<svg viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4zM16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12"/></svg>',
   refresh: '<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5"/></svg>',
@@ -80,14 +82,30 @@ function wireVideos(root) {
   }));
 }
 
+function stepSlides(frame, dir) {
+  const slides = frame && $(".slides", frame);
+  if (!slides) return;
+  const n = slides.children.length;
+  const i = Math.round(slides.scrollLeft / Math.max(1, slides.clientWidth));
+  const next = Math.max(0, Math.min(n - 1, i + dir));
+  slides.scrollTo({ left: next * slides.clientWidth, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+}
+
 function wireSlides(root) {
   $$(".frame", root).forEach((frame) => {
     const slides = $(".slides", frame), dots = $$(".dots i", frame);
     if (!slides || dots.length < 2) return;
-    slides.addEventListener("scroll", () => {
-      const i = Math.round(slides.scrollLeft / slides.clientWidth);
+    const prev = $(".nav.prev", frame), next = $(".nav.next", frame);
+    const update = () => {
+      const i = Math.round(slides.scrollLeft / Math.max(1, slides.clientWidth));
       dots.forEach((d, j) => d.classList.toggle("on", i === j));
-    }, { passive: true });
+      if (prev) prev.hidden = i === 0;
+      if (next) next.hidden = i === dots.length - 1;
+    };
+    slides.addEventListener("scroll", update, { passive: true });
+    prev?.addEventListener("click", (e) => { e.preventDefault(); stepSlides(frame, -1); });
+    next?.addEventListener("click", (e) => { e.preventDefault(); stepSlides(frame, 1); });
+    update();
   });
 }
 
@@ -114,7 +132,9 @@ function frameHTML(p) {
   const hasVideo = media.some((m) => m.video);
   return `<div class="frame">
     <div class="slides">${media.map(slideHTML).join("")}</div>
-    ${media.length > 1 ? `<div class="dots">${media.map((_, i) => `<i class="${i ? "" : "on"}"></i>`).join("")}</div>` : ""}
+    ${media.length > 1 ? `<div class="dots">${media.map((_, i) => `<i class="${i ? "" : "on"}"></i>`).join("")}</div>
+      <button class="nav prev" aria-label="Previous photo">${I.chevL}</button>
+      <button class="nav next" aria-label="Next photo">${I.chevR}</button>` : ""}
     ${hasVideo ? `<button class="mute" aria-label="Toggle sound">${muted ? I.muted : I.sound}</button>` : ""}
   </div>`;
 }
@@ -726,7 +746,13 @@ window.addEventListener("hashchange", (e) => {
 });
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !overlay.hidden && !storyState) closeOverlay();
+  if (overlay.hidden || storyState) return;
+  if (e.key === "Escape") closeOverlay();
+  else if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+    // Arrow keys page the open post's photos, wherever focus happens to be
+    e.preventDefault();
+    stepSlides($(".post-view .frame", overlay), e.key === "ArrowRight" ? 1 : -1);
+  }
 });
 
 $("#refresh-all").addEventListener("click", async (e) => {

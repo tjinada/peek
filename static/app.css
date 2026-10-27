@@ -109,6 +109,13 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 .dots { position: absolute; left: 0; right: 0; bottom: 10px; display: flex; justify-content: center; gap: 5px; pointer-events: none; }
 .dots i { width: 6px; height: 6px; border-radius: 50%; background: rgba(255,255,255,.45); transition: background .2s, transform .2s; }
 .dots i.on { background: #fff; transform: scale(1.2); }
+.nav { position: absolute; top: 50%; transform: translateY(-50%); width: 34px; height: 34px; border-radius: 50%; border: 0;
+  display: grid; place-items: center; cursor: pointer; background: rgba(255,255,255,.85); color: #1d1b22; opacity: 0; transition: opacity .15s; }
+.nav svg { width: 20px; height: 20px; stroke-width: 2.2; }
+.nav.prev { left: 10px; } .nav.next { right: 10px; }
+.nav[hidden] { display: none; }
+.frame:hover .nav, .nav:focus-visible { opacity: 1; }
+@media (hover: none) { .nav { display: none; } }   /* touch: swipe instead */
 .count-pill { position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,.55); color: #fff; font-size: 12px; padding: 3px 9px; border-radius: 99px; }
 .mute { position: absolute; bottom: 10px; right: 10px; background: rgba(0,0,0,.55); color: #fff; border: 0; border-radius: 50%; width: 34px; height: 34px; display: grid; place-items: center; cursor: pointer; }
 .mute svg { width: 18px; height: 18px; }
