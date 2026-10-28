@@ -334,8 +334,8 @@ def set_policy(body: Policy):
 @app.get("/api/burner")
 async def burner(force: bool = False):
     """Everything the Burner tab shows: session state, budget, per-path counters, spend by
-    kind, the account's own counts, and the feature switches. Cached for six hours in the
-    fetcher; ?force=1 re-reads the account, which costs two requests."""
+    kind, the account's own counts, and the feature switches. Live, except the account's
+    own counts (cached six hours); ?force=1 re-reads those, which costs one request."""
     return await asyncio.to_thread(fetcher.burner_stats, force)
 
 

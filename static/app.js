@@ -818,8 +818,8 @@ function wireSessionCard(box, s) {
 
 /* ================================================================ burner tab
    What the burner is actually being spent on. Read-only apart from the session card above,
-   which is the same one Following uses. Nothing here polls: a forced read costs two
-   session requests, so the numbers are cached server-side for six hours. */
+   which is the same one Following uses. Nothing here polls. Counters are live on every
+   load; only the account's own counts are cached server-side (six hours, one request). */
 
 const fmtDuration = (secs) => {
   const h = Math.floor(secs / 3600), m = Math.round((secs % 3600) / 60);
@@ -878,7 +878,8 @@ async function burnerView(seq = renderSeq) {
         ["Following", num(own.following)],
         ["Posts", num(own.posts)],
         ["Last read", own.fetched_at ? agoText(own.fetched_at) : "–"],
-      ]) : `<p class="hint">No own-account data yet. It's read once when the session is working and kept for six hours.</p>`}
+      ]) : `<p class="hint">No own-account data yet. It's read once the session is working and kept for six hours.</p>`}
+      ${d.own_error ? `<p class="warn">${esc(d.own_error)}</p>` : ""}
       ${(d.warnings || []).map((w) => `<p class="warn">${esc(w)}</p>`).join("")}
     </section>
 

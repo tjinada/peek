@@ -68,13 +68,16 @@ class FetchError(Exception):
 _started = time.time()
 _counters = Counter()  # anon, session, anon_fail, session_fail
 _kinds = Counter()  # profile, grid, post, stories, reels, highlights, search, stats
-_stats_cache: tuple[float, dict] | None = None
-STATS_TTL = 6 * 3600
+STATS_TTL = 6 * 3600  # the burner's own follower/post counts: they barely move
+_own_error: str | None = None  # why the last read of those counts failed, for the Burner tab
+_own_failed_at = 0.0
+OWN_RETRY = 15 * 60  # after a failed read, page loads don't retry (and spend) for this long
 
 
 def invalidate_stats():
-    global _stats_cache
-    _stats_cache = None
+    """Session changed: forget the last own-stats failure so the next read is tried afresh."""
+    global _own_error, _own_failed_at
+    _own_error, _own_failed_at = None, 0.0
 
 
 # ---------------------------------------------------------------- rate limits
@@ -1752,59 +1755,62 @@ def _friendly(e: Exception) -> str:
 # has rather than spending.
 
 def _own_stats(force: bool = False) -> dict | None:
-    """The burner account's own follower/following/post counts, cached on the session row."""
+    """The burner account's own follower/following/post counts, cached on the session row
+    for STATS_TTL. Read by the session's own user id (from the sessionid), so it works
+    whether or not IG_USER is set or matches. None until a read has succeeded once."""
+    global _own_error, _own_failed_at
     row = _session_row()
     if not row or not row.get("sessionid"):
         return None
-    try:
-        fetched_at = row["ig_fetched_at"]
-        cached = {"followers": row["ig_followers"], "following": row["ig_following"],
-                  "posts": row["ig_posts"], "fetched_at": fetched_at}
-    except (IndexError, KeyError):  # db.py not migrated yet
-        fetched_at, cached = None, None
-    if not force and fetched_at and time.time() - fetched_at < STATS_TTL and cached["followers"] is not None:
+    fetched_at = row.get("ig_fetched_at")
+    cached = ({"followers": row.get("ig_followers"), "following": row.get("ig_following"),
+               "posts": row.get("ig_posts"), "fetched_at": fetched_at} if fetched_at else None)
+    if cached and not force and time.time() - fetched_at < STATS_TTL:
         return cached
+    if not force and time.time() - _own_failed_at < OWN_RETRY:
+        return cached  # failed recently: don't spend a request on every page load
     try:
         _check_session_ready()
-    except FetchError:
+    except FetchError as e:
+        _own_error = str(e)
         return cached
+    uid = _cookies(row)["ds_user_id"]
     with _lock:
         _spend("stats")
         try:
             with _using(_session_loader()):
-                p = _get_profile(IG_USER)
+                p = _profile_by_id(int(uid))
+            if not p:
+                raise FetchError("Instagram returned no profile for the session's own id")
         except Exception as e:
+            _own_error = f"Couldn't read the account: {_friendly(e)}"
+            _own_failed_at = time.time()
             log.info("own-stats fetch failed: %s", e)
             return cached
-    data = {"followers": p.followers, "following": p.followees, "posts": p.mediacount,
-            "fetched_at": time.time()}
-    try:
-        db.execute("UPDATE session SET ig_followers=?, ig_following=?, ig_posts=?, ig_fetched_at=? WHERE id=1",
-                   (data["followers"], data["following"], data["posts"], data["fetched_at"]))
-    except Exception as e:  # columns missing
-        log.debug("couldn't store own stats: %s", e)
+    _own_error = None
+    data = {"followers": p.followers, "following": p.followees, "posts": p.mediacount, "fetched_at": time.time()}
+    db.execute("UPDATE session SET ig_followers=?, ig_following=?, ig_posts=?, ig_fetched_at=?, "
+               "username=COALESCE(username, ?) WHERE id=1",
+               (data["followers"], data["following"], data["posts"], data["fetched_at"], p.username.lower()))
     return data
 
 
 def burner_stats(force: bool = False) -> dict:
-    """Everything the Burner tab shows. Cached for six hours; force re-reads."""
-    global _stats_cache
-    if not force and _stats_cache and time.time() - _stats_cache[0] < STATS_TTL:
-        return _stats_cache[1]
-
+    """Everything the Burner tab shows. Only the account's own counts are cached (they cost a
+    request); counters, budget and session state are read live on every call."""
     own = _own_stats(force)
     warnings = []
     if own:
         if own["followers"] is not None and own["followers"] <= 1:
             warnings.append("Almost no followers. An empty new account gets challenged more often.")
-        if not own["posts"]:
+        if own["posts"] == 0:
             warnings.append("No posts. A couple of throwaway posts make it look less like a bot.")
     if _policy() == "always":
         warnings.append("Policy is \"always\": public profiles are running on the burner too.")
 
     totals = db.one("SELECT COUNT(*) AS n, SUM(restricted) AS r, SUM(is_private) AS p, "
                     "SUM(followed) AS f FROM accounts") or {}
-    data = {
+    return {
         "session": session_info(),
         "uptime": time.time() - _started,
         "counters": {
@@ -1813,6 +1819,7 @@ def burner_stats(force: bool = False) -> dict:
         },
         "kinds": dict(_kinds.most_common()),
         "own": own,
+        "own_error": _own_error,
         "warnings": warnings,
         "switches": {"reels_tab": REELS_TAB, "search": IG_SEARCH, "stories_batched": STORIES_BATCHED},
         "accounts": {
@@ -1821,8 +1828,6 @@ def burner_stats(force: bool = False) -> dict:
             "private": totals.get("p") or 0,
         },
     }
-    _stats_cache = (time.time(), data)
-    return data
 
 
 def prune_expired_stories(keep_days: int = 7):
