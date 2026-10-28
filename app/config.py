@@ -18,7 +18,7 @@ MAX_POSTS = int(os.getenv("PEEK_MAX_POSTS", "24"))
 ACCOUNT_DELAY = (float(os.getenv("PEEK_DELAY_MIN", "20")), float(os.getenv("PEEK_DELAY_MAX", "60")))
 
 # Optional burner session — enables stories, private-follow and restricted profiles.
-IG_USER = os.getenv("IG_USER", "").strip()
+IG_USER = os.getenv("IG_USER", "").strip().lstrip("@")
 IG_SESSIONID = os.getenv("IG_SESSIONID", "").strip()
 IG_CSRFTOKEN = os.getenv("IG_CSRFTOKEN", "").strip()  # optional; a random one is used if blank
 
@@ -33,11 +33,25 @@ IG_RUR = os.getenv("IG_RUR", "").strip()
 # How the burner is spent. "restricted" (default): only accounts flagged age/region
 # restricted or private, plus features that cannot work without a login. "off": never,
 # restricted profiles simply fail. "always": every request uses it.
-SESSION_POLICY = os.getenv("PEEK_SESSION_POLICY", "restricted")
+#
+# Normalised and validated: a typo falls back to "restricted" rather than quietly
+# behaving like something else.
+SESSION_POLICY = os.getenv("PEEK_SESSION_POLICY", "restricted").strip().lower()
+if SESSION_POLICY not in ("off", "restricted", "always"):
+    SESSION_POLICY = "restricted"
 
 # Ceiling on session-attributed operations per hour. Public work carries on past it;
 # restricted accounts wait for the hour to roll.
 SESSION_BUDGET_HOUR = int(os.getenv("PEEK_SESSION_BUDGET_HOUR", "300"))
+
+# Minutes each path sits out after a 429. They're separate on purpose: a rate-limited
+# burner must not stop public fetching, and public bursts must not park the session.
+SESSION_COOLDOWN_MIN = float(os.getenv("PEEK_SESSION_COOLDOWN_MIN", "15"))
+ANON_COOLDOWN_MIN = float(os.getenv("PEEK_ANON_COOLDOWN_MIN", "10"))
+
+# How often the stored session is re-checked. Raise it if the burner also gets used
+# from a browser — frequent checks from a different address look like impossible travel.
+SESSION_CHECK_HOURS = float(os.getenv("PEEK_SESSION_CHECK_HOURS", "6"))
 
 # Fetch the whole followed-stories tray in one request per cycle, instead of one
 # request per account per refresh.

@@ -271,6 +271,7 @@ def status():
         "session": fetcher.session_info(),
         "session_policy": fetcher._policy(),
         "session_budget_left": fetcher._budget_left(),
+        "session_budget_total": fetcher.SESSION_BUDGET_HOUR,
         "paused_until": fetcher.cooldown_until(),
         "anon_paused_until": fetcher._anon_blocked(),
         "password": bool(PEEK_PASSWORD),
@@ -320,11 +321,22 @@ class Policy(BaseModel):
 @app.put("/api/session/policy")
 def set_policy(body: Policy):
     """How the burner is spent. "restricted" is the default and the cheapest useful setting."""
-    if body.policy not in ("off", "restricted", "always"):
-        raise HTTPException(400, "policy must be off, restricted or always")
-    db.set_setting("session_policy", body.policy)
-    log.info("session policy set to %s", body.policy)
+    try:
+        fetcher.set_policy(body.policy)
+    except fetcher.FetchError as e:
+        raise HTTPException(400, str(e))
     return {"policy": body.policy}
+
+
+# ---------------------------------------------------------------- burner tab
+
+
+@app.get("/api/burner")
+async def burner(force: bool = False):
+    """Everything the Burner tab shows: session state, budget, per-path counters, spend by
+    kind, the account's own counts, and the feature switches. Cached for six hours in the
+    fetcher; ?force=1 re-reads the account, which costs two requests."""
+    return await asyncio.to_thread(fetcher.burner_stats, force)
 
 
 @app.get("/api/feed")

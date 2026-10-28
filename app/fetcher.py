@@ -1,12 +1,17 @@
 """Everything that talks to Instagram lives here. Instaloader does the protocol work;
 this module maps its objects into the cache and downloads media to disk (Instagram's
 CDN URLs are signed and expire, so a local copy is the only thing that lasts).
-Metadata is stored first; files download in a parallel pool afterwards."""
+Metadata is stored first; files download in a parallel pool afterwards.
+
+Fetching is anonymous-first: public profiles, grids, hydration and pagination all run
+logged out. The burner is spent only on accounts flagged restricted/private and on the
+features that cannot work without a login. Every session operation is tagged with a kind
+and counted, so the Burner tab can show where the budget actually goes."""
 import hashlib
 import json
 import queue
 import zipfile
-from collections import deque
+from collections import Counter, deque
 from contextlib import contextmanager
 from pathlib import Path
 import logging
@@ -54,6 +59,22 @@ _http = httpx.Client(headers={"User-Agent": UA}, timeout=60, follow_redirects=Tr
 
 class FetchError(Exception):
     pass
+
+
+# ---------------------------------------------------------------- burner telemetry
+# Process-lifetime counters for the Burner tab. Deliberately not persisted: nothing writes
+# on the hot path, and a restart is a clean slate.
+
+_started = time.time()
+_counters = Counter()  # anon, session, anon_fail, session_fail
+_kinds = Counter()  # profile, grid, post, stories, reels, highlights, search, stats
+_stats_cache: tuple[float, dict] | None = None
+STATS_TTL = 6 * 3600
+
+
+def invalidate_stats():
+    global _stats_cache
+    _stats_cache = None
 
 
 # ---------------------------------------------------------------- rate limits
@@ -105,10 +126,12 @@ def _cool(seconds: float, why: str):
     until = time.time() + seconds
     if getattr(_probe, "ctx", "anon") == "session":
         _session_cooldown = max(_session_cooldown, until)
+        _counters["session_fail"] += 1
         log.warning("burner cooling until %s: %s",
                     time.strftime("%H:%M", time.localtime(_session_cooldown)), why)
     else:
         _anon_cooldown = max(_anon_cooldown, until)
+        _counters["anon_fail"] += 1
         log.info("anonymous fetching cooling until %s: %s",
                  time.strftime("%H:%M", time.localtime(_anon_cooldown)), why)
 
@@ -310,6 +333,7 @@ def _reload_loader():
     new = _make_loader()
     with _lock:
         L = _anon
+    invalidate_stats()
     log.info("Instagram session: %s", "logged in" if new.context.is_logged_in else "logged out")
 
 
@@ -339,9 +363,21 @@ def _policy() -> str:
     return db.get_setting("session_policy", SESSION_POLICY) or "restricted"
 
 
-def _spend():
+def set_policy(value: str) -> str:
+    """off | restricted | always. Persisted, so it survives a restart."""
+    if value not in ("off", "restricted", "always"):
+        raise FetchError(f"Unknown session policy: {value}")
+    db.set_setting("session_policy", value)
+    invalidate_stats()
+    log.info("session policy set to %s", value)
+    return value
+
+
+def _spend(kind: str = "other"):
     now = time.time()
     _session_hits.append(now)
+    _counters["session"] += 1
+    _kinds[kind] += 1
     while _session_hits and now - _session_hits[0] > 3600:
         _session_hits.popleft()
 
@@ -435,6 +471,8 @@ def session_info() -> dict:
         "has_device_cookies": bool(row.get("mid") or row.get("ig_did")),
         "policy": _policy(),
         "budget_left": _budget_left(),
+        "budget_total": SESSION_BUDGET_HOUR,
+        "cooldown": max(0.0, (_session_blocked() or 0) - time.time()),
     }
 
 
@@ -473,6 +511,7 @@ def test_login() -> dict:
         log.warning("Instagram session is no longer valid: %s", res["error"])
     if (res["state"] == "ok") != logged_in() or res.get("username") not in (None, row["username"]):
         _reload_loader()
+    invalidate_stats()
     return session_info()
 
 
@@ -848,6 +887,7 @@ def hydrate(sc: str) -> bool:
             return True
         try:
             with _using(_anon):
+                _counters["anon"] += 1
                 post = instaloader.Post.from_shortcode(L.context, sc)
         except (QueryReturnedNotFoundException, BadResponseException):
             db.execute("UPDATE posts SET detailed=-1 WHERE shortcode=?", (sc,))  # deleted or unavailable
@@ -1052,15 +1092,15 @@ def _fetch_with_policy(username: str, with_stories: bool) -> dict:
     known = bool(acct and (acct["restricted"] or acct["is_private"]))
 
     if _policy() == "off":
-        return _guarded(username, with_stories, session=False)
+        return _guarded(username, with_stories, session=False, kind="profile")
 
     if known:
         if not _session_ready():
             raise LookupRefused("This account needs the burner and it isn't usable right now")
-        return _guarded(username, with_stories, session=True)
+        return _guarded(username, with_stories, session=True, kind="profile")
 
     try:
-        return _guarded(username, with_stories, session=False)
+        return _guarded(username, with_stories, session=False, kind="profile")
     except (ProfileNotExistsException, LookupRefused):
         if not _session_ready():
             raise
@@ -1068,12 +1108,12 @@ def _fetch_with_policy(username: str, with_stories: bool) -> dict:
             log.info("%s: invisible anonymously; flagging it restricted", username)
             db.execute("INSERT INTO accounts (username, restricted) VALUES (?,1) "
                        "ON CONFLICT(username) DO UPDATE SET restricted=1", (username,))
-        return _guarded(username, with_stories, session=True)
+        return _guarded(username, with_stories, session=True, kind="profile")
 
 
-def _guarded(username: str, with_stories: bool, session: bool) -> dict:
+def _guarded(username: str, with_stories: bool, session: bool, kind: str = "profile") -> dict:
     try:
-        return _attempt(username, with_stories, session)
+        return _attempt(username, with_stories, session, kind)
     except (ProfileNotExistsException, LookupRefused):
         raise
     except (LoginRequiredException, ConnectionException, BadResponseException) as e:
@@ -1082,13 +1122,14 @@ def _guarded(username: str, with_stories: bool, session: bool) -> dict:
         raise FetchError(msg)
 
 
-def _attempt(username: str, with_stories: bool, session: bool) -> dict:
+def _attempt(username: str, with_stories: bool, session: bool, kind: str = "profile") -> dict:
     if session:
         _check_session_ready()
-        _spend()
+        _spend(kind)
         with _using(_session_loader()):
             return _refresh_body(username, with_stories)
     _check_anon()
+    _counters["anon"] += 1
     with _using(_anon):
         return _refresh_body(username, with_stories)
 
@@ -1153,7 +1194,7 @@ def _refresh_body(username: str, with_stories: bool) -> dict:
     reels = 0
     if REELS_TAB and _session_ready() and (not p.is_private or p.followed_by_viewer):
         try:
-            _spend()
+            _spend("reels")
             with _using(_session_loader()):
                 reels = _reels_newest(username, p.userid)
         except Exception as e:  # posts are what matter; the reels tab is a bonus
@@ -1162,7 +1203,7 @@ def _refresh_body(username: str, with_stories: bool) -> dict:
     stories = 0
     if with_stories and not STORIES_BATCHED and _session_ready():
         try:
-            _spend()
+            _spend("stories")
             with _using(_session_loader()):
                 stories = _refresh_stories(username, p.userid)
         except Exception as e:
@@ -1240,10 +1281,11 @@ def _load_older_locked(username: str, count: int) -> dict:
 
     if need_session:
         _check_session_ready()
-        _spend()
+        _spend("grid")
         loader = _session_loader()
     else:
         _check_anon()
+        _counters["anon"] += 1
         loader = _anon
 
     with _using(loader):
@@ -1378,7 +1420,7 @@ def load_older_reels(username: str, count: int = 12) -> dict:
     try:
         with _lock:
             _check_session_ready()
-            _spend()
+            _spend("reels")
             with _using(_session_loader()):
                 res = _load_older_reels_locked(username, count)
     finally:
@@ -1455,7 +1497,7 @@ def search_instagram(q: str) -> list[dict]:
     global _search_path
     with _lock:
         _check_session_ready()
-        _spend()
+        _spend("search")
         with _using(_session_loader()):
             _probe.on = True  # a refused search shouldn't cool the whole burner
             try:
@@ -1528,7 +1570,7 @@ def refresh_highlights(username: str) -> int:
         return 0
     _check_session_ready()
     with _lock:
-        _spend()
+        _spend("highlights")
         with _using(_session_loader()):
             try:
                 found = list(L.get_highlights(int(a["userid"])))
@@ -1567,7 +1609,7 @@ def highlight_items(hid: str) -> list[dict]:
     if not fresh and _session_ready():
         _check_session_ready()
         with _lock:
-            _spend()
+            _spend("highlights")
             with _using(_session_loader()):
                 try:
                     owner = instaloader.Profile(L.context, {"id": h["userid"], "username": h["username"]})
@@ -1659,7 +1701,7 @@ def refresh_all_stories() -> int:
     _check_session_ready()
     count = 0
     with _lock:
-        _spend()
+        _spend("stories")
         with _using(_session_loader()):
             for story in L.get_stories():  # no userids: the whole tray
                 owner = (story.owner_username or "").lower()
@@ -1701,6 +1743,86 @@ def _friendly(e: Exception) -> str:
     if "Redirected to login" in s:
         return "Instagram showed a login wall — try again later"
     return s[:200]
+
+
+# ---------------------------------------------------------------- burner tab stats
+# Read-only. Two things are deliberately cached for six hours: the burner's own follower
+# counts (they barely move and cost two requests) and the assembled report. Nothing here
+# touches the cache while a session is cooling or the budget is gone — it returns what it
+# has rather than spending.
+
+def _own_stats(force: bool = False) -> dict | None:
+    """The burner account's own follower/following/post counts, cached on the session row."""
+    row = _session_row()
+    if not row or not row.get("sessionid"):
+        return None
+    try:
+        fetched_at = row["ig_fetched_at"]
+        cached = {"followers": row["ig_followers"], "following": row["ig_following"],
+                  "posts": row["ig_posts"], "fetched_at": fetched_at}
+    except (IndexError, KeyError):  # db.py not migrated yet
+        fetched_at, cached = None, None
+    if not force and fetched_at and time.time() - fetched_at < STATS_TTL and cached["followers"] is not None:
+        return cached
+    try:
+        _check_session_ready()
+    except FetchError:
+        return cached
+    with _lock:
+        _spend("stats")
+        try:
+            with _using(_session_loader()):
+                p = _get_profile(IG_USER)
+        except Exception as e:
+            log.info("own-stats fetch failed: %s", e)
+            return cached
+    data = {"followers": p.followers, "following": p.followees, "posts": p.mediacount,
+            "fetched_at": time.time()}
+    try:
+        db.execute("UPDATE session SET ig_followers=?, ig_following=?, ig_posts=?, ig_fetched_at=? WHERE id=1",
+                   (data["followers"], data["following"], data["posts"], data["fetched_at"]))
+    except Exception as e:  # columns missing
+        log.debug("couldn't store own stats: %s", e)
+    return data
+
+
+def burner_stats(force: bool = False) -> dict:
+    """Everything the Burner tab shows. Cached for six hours; force re-reads."""
+    global _stats_cache
+    if not force and _stats_cache and time.time() - _stats_cache[0] < STATS_TTL:
+        return _stats_cache[1]
+
+    own = _own_stats(force)
+    warnings = []
+    if own:
+        if own["followers"] is not None and own["followers"] <= 1:
+            warnings.append("Almost no followers. An empty new account gets challenged more often.")
+        if not own["posts"]:
+            warnings.append("No posts. A couple of throwaway posts make it look less like a bot.")
+    if _policy() == "always":
+        warnings.append("Policy is \"always\": public profiles are running on the burner too.")
+
+    totals = db.one("SELECT COUNT(*) AS n, SUM(restricted) AS r, SUM(is_private) AS p, "
+                    "SUM(followed) AS f FROM accounts") or {}
+    data = {
+        "session": session_info(),
+        "uptime": time.time() - _started,
+        "counters": {
+            "anon": _counters["anon"], "session": _counters["session"],
+            "anon_fail": _counters["anon_fail"], "session_fail": _counters["session_fail"],
+        },
+        "kinds": dict(_kinds.most_common()),
+        "own": own,
+        "warnings": warnings,
+        "switches": {"reels_tab": REELS_TAB, "search": IG_SEARCH, "stories_batched": STORIES_BATCHED},
+        "accounts": {
+            "followed": totals.get("f") or 0,
+            "restricted": totals.get("r") or 0,
+            "private": totals.get("p") or 0,
+        },
+    }
+    _stats_cache = (time.time(), data)
+    return data
 
 
 def prune_expired_stories(keep_days: int = 7):

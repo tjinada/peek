@@ -79,11 +79,18 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
   border-top: 1px solid var(--line);
 }
 .tabs a {
-  flex: 0 1 96px; display: flex; flex-direction: column; align-items: center; gap: 2px;
-  text-decoration: none; color: var(--muted); font-size: 0.7188rem; font-weight: 500; border-radius: 12px; padding-top: 4px;
+  flex: 0 1 96px; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 2px;
+  text-decoration: none; color: var(--muted); font-size: 0.7188rem; font-weight: 500; border-radius: 12px; padding: 4px 2px 0;
 }
+/* six tabs have to survive a 360px screen: labels ellipsise rather than overflow */
+.tabs a span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tabs a[aria-current="page"] { color: var(--text); }
 .tabs a[aria-current="page"] svg { stroke: var(--safelight); }
+@media (max-width: 400px) {
+  .tabs { gap: 2px; padding-inline: 4px; }
+  .tabs a { font-size: 0.6563rem; }
+  .tabs a svg { width: 22px; height: 22px; }
+}
 
 #view { max-width: var(--col); margin: 0 auto; outline: none; }
 #view.wide { max-width: 960px; }
@@ -483,3 +490,26 @@ a.tag:hover { text-decoration: underline; }
 .tag-restricted::before { content: "🔒"; margin-right: 3px; }
 
 [data-policy] { margin-bottom: 4px; }
+
+/* ---------------------------------------------------------------- burner tab */
+/* A stack of bordered panels rather than one long scroll of prose: each block is a
+   self-contained reading, and the numbers stay tabular so they line up down the column. */
+.panel { margin-top: 20px; padding: 14px 16px 16px; background: var(--surface);
+  border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.panel .sub { margin-top: 0; }
+.panel .hint { margin-left: 0; margin-right: 0; }
+.panel .btn { margin-top: 12px; }
+
+.stats-table { width: 100%; border-collapse: collapse; font-size: 0.8438rem; margin-top: 8px; }
+.stats-table th, .stats-table td { padding: 7px 0; border-bottom: 1px solid var(--line); }
+.stats-table th { text-align: left; font-weight: 500; color: var(--muted); padding-right: 12px; }
+.stats-table td { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.stats-table tr:last-child th, .stats-table tr:last-child td { border-bottom: 0; padding-bottom: 0; }
+.stats-table td.warn { color: var(--safelight); }
+
+.meter { height: 8px; margin: 12px 0 10px; border-radius: 99px; background: var(--raise);
+  border: 1px solid var(--line); overflow: hidden; }
+.meter i { display: block; height: 100%; background: var(--safelight); transition: width .3s; }
+@media (prefers-reduced-motion: reduce) { .meter i { transition: none; } }
+
+.warn { margin: 10px 0 0; font-size: 0.8438rem; color: var(--safelight); max-width: 60ch; }

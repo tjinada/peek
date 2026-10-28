@@ -816,6 +816,97 @@ function wireSessionCard(box, s) {
   });
 }
 
+/* ================================================================ burner tab
+   What the burner is actually being spent on. Read-only apart from the session card above,
+   which is the same one Following uses. Nothing here polls: a forced read costs two
+   session requests, so the numbers are cached server-side for six hours. */
+
+const fmtDuration = (secs) => {
+  const h = Math.floor(secs / 3600), m = Math.round((secs % 3600) / 60);
+  return h ? `${h}h ${m}m` : m ? `${m}m` : "under a minute";
+};
+
+function statsTable(rows) {
+  return `<table class="stats-table">${rows.map(([label, value, cls]) =>
+    `<tr><th scope="row">${esc(label)}</th><td class="${cls || ""}">${esc(value)}</td></tr>`).join("")}</table>`;
+}
+
+async function burnerView(seq = renderSeq) {
+  view.innerHTML = `<div class="loading"></div>`;
+  const d = await api("/api/burner");
+  if (moved(seq)) return;
+  const s = d.session;
+  const total = s.budget_total || 0;
+  const left = s.budget_left ?? 0;
+  const pct = total ? Math.round((left / total) * 100) : 0;
+  const kinds = Object.entries(d.kinds || {}).sort((a, b) => b[1] - a[1]);
+  const c = d.counters || {};
+  const sw = d.switches || {};
+  const acc = d.accounts || {};
+  const own = d.own;
+
+  view.innerHTML = `<div class="page-pad">
+    <h1 class="page-title">Burner</h1>
+    <p class="hint">Where the burner session is going, and how the account itself looks. Counters cover this run only and reset when Peek restarts.</p>
+    ${sessionBanner(s)}
+    <section class="session-box" id="b-session"></section>
+
+    <section class="panel">
+      <h2 class="sub">Hourly budget</h2>
+      <div class="meter" role="meter" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${left}"><i style="width:${pct}%"></i></div>
+      <p class="hint">${left} of ${total} burner operations left this hour. Public accounts keep working anonymously past this; restricted ones queue.</p>
+      <button class="btn" id="b-force">${I.refresh}Re-read the account</button>
+    </section>
+
+    <section class="panel">
+      <h2 class="sub">Traffic since Peek started (${esc(fmtDuration(d.uptime || 0))})</h2>
+      ${statsTable([
+        ["Anonymous requests", num(c.anon ?? 0)],
+        ["Session requests", num(c.session ?? 0)],
+        ["Anonymous failures", num(c.anon_fail ?? 0), (c.anon_fail ?? 0) ? "warn" : ""],
+        ["Session failures", num(c.session_fail ?? 0), (c.session_fail ?? 0) ? "warn" : ""],
+      ])}
+      ${kinds.length ? `<h3 class="sub">Session spend by kind</h3>${statsTable(kinds.map(([k, v]) => [k, num(v)]))}`
+        : `<p class="hint">Nothing spent yet.</p>`}
+      <p class="hint">"profile" is a lookup, "stories" is the whole tray in one request, "reels", "highlights", "search" and "stats" are what they say. If "profile" dominates, most of your follows are restricted.</p>
+    </section>
+
+    <section class="panel">
+      <h2 class="sub">The account itself</h2>
+      ${own ? statsTable([
+        ["Followers", num(own.followers)],
+        ["Following", num(own.following)],
+        ["Posts", num(own.posts)],
+        ["Last read", own.fetched_at ? agoText(own.fetched_at) : "–"],
+      ]) : `<p class="hint">No own-account data yet. It's read once when the session is working and kept for six hours.</p>`}
+      ${(d.warnings || []).map((w) => `<p class="warn">${esc(w)}</p>`).join("")}
+    </section>
+
+    <section class="panel">
+      <h2 class="sub">What's switched on</h2>
+      ${statsTable([
+        ["Reels tab", sw.reels_tab ? "on" : "off"],
+        ["Instagram search", sw.search ? "on" : "off"],
+        ["Batched stories", sw.stories_batched ? "on" : "off"],
+        ["Accounts followed", num(acc.followed ?? 0)],
+        ["Flagged restricted", num(acc.restricted ?? 0)],
+        ["Private", num(acc.private ?? 0)],
+      ])}
+      <p class="hint">These come from the environment, so changing them needs a restart. Flagged accounts always use the burner regardless of the policy.</p>
+    </section>
+  </div>`;
+
+  const sbox = $("#b-session");
+  sbox.innerHTML = sessionCardHTML(s);
+  wireSessionCard(sbox, s);
+  $("#b-force").addEventListener("click", async () => {
+    const btn = $("#b-force");
+    btn.disabled = true; btn.lastChild.textContent = "Reading";
+    try { await api("/api/burner?force=1"); await burnerView(); }
+    catch (err) { toast(err.message); btn.disabled = false; btn.lastChild.textContent = "Re-read the account"; }
+  });
+}
+
 // Following list order, remembered per device.
 const SORTS = { latest: "Latest post", unread: "New posts", name: "Name", problems: "Problems first" };
 function sortAccounts(list) {
@@ -1668,6 +1759,7 @@ async function render() {
     else if (route === "search") searchView(arg ? decodeURIComponent(arg) : "");
     else if (route === "saved") await savedView(seq);
     else if (route === "following") await followingView(seq);
+    else if (route === "burner") await burnerView(seq);
     else await feedView(seq);
   } catch (e) {
     if (e.message !== "auth") view.innerHTML = empty("Something went wrong", esc(e.message), `<button class="btn" onclick="location.reload()">Reload</button>`);

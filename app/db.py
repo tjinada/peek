@@ -104,7 +104,11 @@ CREATE TABLE IF NOT EXISTS session (
     last_error  TEXT,
     source      TEXT,                                 -- env | ui
     env_hash    TEXT,                                 -- which IG_SESSIONID was seeded last
-    saved_at    REAL
+    saved_at    REAL,
+    ig_followers  INTEGER,                            -- the burner's own counts, for the Burner tab
+    ig_following  INTEGER,
+    ig_posts      INTEGER,
+    ig_fetched_at REAL                                -- when those were last read
 );
 CREATE TABLE IF NOT EXISTS groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL);
 CREATE TABLE IF NOT EXISTS account_groups (
@@ -123,6 +127,8 @@ MIGRATIONS = (
     ("accounts", "reels_cursor", "TEXT"), ("accounts", "reels_done", "INTEGER DEFAULT 0"),
     ("accounts", "muted", "INTEGER DEFAULT 0"), ("accounts", "viewed_at", "REAL"),
     ("accounts", "restricted", "INTEGER DEFAULT 0"),
+    ("session", "ig_followers", "INTEGER"), ("session", "ig_following", "INTEGER"),
+    ("session", "ig_posts", "INTEGER"), ("session", "ig_fetched_at", "REAL"),
 )
 
 

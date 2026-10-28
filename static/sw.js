@@ -1,6 +1,10 @@
 // App shell is cached so the PWA opens instantly; API is always network-first;
 // saved media never changes, so it's cache-first.
-const SHELL = "peek-shell-v7";
+//
+// Bump SHELL whenever app.js, app.css or index.html change. The version is what publishes
+// a release: install refetches the shell, activate drops the old cache, and a stale pair
+// can't survive a deploy.
+const SHELL = "peek-shell-v8";
 const MEDIA = "peek-media-v1";
 const SHELL_FILES = ["/", "/index.html", "/app.css", "/app.js", "/manifest.webmanifest", "/icons/icon-192.png"];
 
@@ -13,6 +17,7 @@ self.addEventListener("activate", (e) => {
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== "GET" || url.origin !== location.origin) return;
+  // /api/burner included: the Burner tab must never be served from cache
   if (url.pathname.startsWith("/api/")) return; // straight to network
   if (url.pathname.startsWith("/media/") || url.pathname.startsWith("/m/") || url.pathname.startsWith("/hl/")) {
     if (/\.mp4$/.test(url.pathname) || url.pathname.startsWith("/hl/i/")) return; // may be video: range requests
