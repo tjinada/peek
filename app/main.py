@@ -127,6 +127,23 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Peek", lifespan=lifespan)
 
 
+# ---------------------------------------------------------------- app shell caching
+# The shell (index.html, app.js, app.css, manifest) is served by StaticFiles with no
+# Cache-Control, so browsers guessed a lifetime and reused old copies without asking. That
+# mixed a new index.html with an old app.js (e.g. a new tab the old router didn't know).
+# no-cache means "revalidate every time": a cheap 304 when unchanged, the new file when not.
+# Media keeps its own long-lived immutable headers.
+
+
+@app.middleware("http")
+async def shell_no_cache(request: Request, call_next):
+    response = await call_next(request)
+    if not request.url.path.startswith(("/api/", "/media/", "/m/", "/hl/", "/sa/")) \
+            and "cache-control" not in response.headers:
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 # ---------------------------------------------------------------- optional password gate
 
 

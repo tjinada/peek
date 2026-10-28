@@ -4,7 +4,7 @@
 // Bump SHELL whenever app.js, app.css or index.html change. The version is what publishes
 // a release: install refetches the shell, activate drops the old cache, and a stale pair
 // can't survive a deploy.
-const SHELL = "peek-shell-v8";
+const SHELL = "peek-shell-v9";
 const MEDIA = "peek-media-v1";
 const SHELL_FILES = ["/", "/index.html", "/app.css", "/app.js", "/manifest.webmanifest", "/icons/icon-192.png"];
 
@@ -30,8 +30,9 @@ self.addEventListener("fetch", (e) => {
     }));
     return;
   }
-  // shell: network first so updates land, cache as fallback
-  e.respondWith(fetch(e.request).then((res) => {
+  // shell: network first so updates land, cache as fallback. cache: "no-cache" makes the
+  // browser revalidate instead of handing back its own (possibly stale) HTTP-cached copy.
+  e.respondWith(fetch(e.request, { cache: "no-cache" }).then((res) => {
     if (res.ok) caches.open(SHELL).then((c) => c.put(e.request, res.clone()));
     return res;
   }).catch(() => caches.match(e.request).then((r) => r || caches.match("/index.html"))));
