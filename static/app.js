@@ -729,6 +729,24 @@ function sessionBanner(s) {
     <a href="#/following/session">Update session</a></div>`;
 }
 
+/* How the burner is spent. "restricted" is the default: only accounts that need it, plus the
+   features that cannot work without a login. "off" means restricted profiles simply fail. */
+const POLICIES = {
+  off: ["Off", "Never. Restricted profiles fail, stories and highlights stay off."],
+  restricted: ["Restricted only", "Only accounts flagged restricted or private, plus stories, highlights, the Reels tab and search."],
+  always: ["Always", "Every request uses the burner. The most exposure, the least stealth."],
+};
+
+function policyHTML(s) {
+  const cur = POLICIES[s.policy] ? s.policy : "restricted";
+  const budget = s.budget_left ?? null;
+  return `<h3 class="sub">Where the burner is used</h3>
+    <div class="seg small" role="radiogroup" data-policy aria-label="Burner use">${Object.entries(POLICIES).map(([k, [label]]) =>
+      `<button role="radio" aria-checked="${k === cur}" data-p="${k}">${esc(label)}</button>`).join("")}</div>
+    <p class="hint">${esc(POLICIES[cur][1])}</p>
+    ${budget != null ? `<p class="hint">${budget > 0 ? `<b>${budget}</b> burner operations left this hour.` : "<b>Hourly burner budget spent</b> — restricted accounts wait for the hour to roll."}</p>` : ""}`;
+}
+
 function sessionCardHTML(s) {
   const when = s.checked_at ? `checked ${agoText(s.checked_at)}` : "not checked yet";
   const line = s.state === "ok" ? `<span class="pill ok">Working</span> Logged in${s.username ? ` as <b>@${esc(s.username)}</b>` : ""}, ${when}.`
@@ -740,6 +758,7 @@ function sessionCardHTML(s) {
     <p class="session-line">${line}</p>
     ${s.error && s.state !== "dead" ? `<p class="hint">Last check: ${esc(s.error)}</p>` : ""}
     ${s.configured ? `<div class="row-btns"><button class="btn" id="s-check">${I.refresh}Check now</button><button class="btn" id="s-out">Sign out</button></div>` : ""}
+    ${policyHTML(s)}
     <details class="session-form" ${open ? "open" : ""}>
       <summary>${s.configured ? "Replace session" : "Add a session"}</summary>
       <form id="s-form">
@@ -771,6 +790,16 @@ function wireSessionCard(box, s) {
     repaint(await api("/api/session", { method: "DELETE" }));
     toast("Signed out. Peek is running logged out.");
   });
+  $$("[data-policy] button", box).forEach((b) => b.addEventListener("click", async () => {
+    if (b.getAttribute("aria-checked") === "true") return;
+    try {
+      await api("/api/session/policy", { method: "PUT", body: { policy: b.dataset.p } });
+      repaint({ ...s, policy: b.dataset.p });
+      toast(b.dataset.p === "off" ? "Burner switched off: restricted profiles will fail"
+        : b.dataset.p === "always" ? "Every request now uses the burner"
+        : "Burner only for restricted accounts and login-only features");
+    } catch (err) { toast(err.message); }
+  }));
   $("#s-form", box).addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = e.target, btn = $("#s-save", box), err = $("#s-err", box);
@@ -965,7 +994,8 @@ async function followingView(seq = renderSeq) {
       <div class="who">
         <a href="#/u/${esc(a.username)}">${esc(a.username)}</a>${a.busy ? '<span class="dot-busy" title="Refreshing"></span>' : ""}${
           a.unread ? `<span class="unread" title="Posts since you last opened this profile">${a.unread > 99 ? "99+" : a.unread} new</span>` : ""}${
-          a.muted ? `<span class="tag-muted" title="Hidden from Feed, Reels and stories">Muted</span>` : ""}
+          a.muted ? `<span class="tag-muted" title="Hidden from Feed, Reels and stories">Muted</span>` : ""}${
+          a.restricted ? `<span class="tag-restricted" title="Age or region restricted: only fetched with the burner session">Restricted</span>` : ""}
         ${a.last_error ? `<small class="err">${esc(a.last_error)}</small>`
           : `<small>${a.fetched_at ? `Checked ${agoText(a.fetched_at)}` : "Waiting for first fetch"}${a.latest_post ? `, latest post ${ago(a.latest_post)}` : ""}</small>`}
         ${groups.length ? `<div class="member" data-user="${esc(a.username)}">${groups.map((g) =>
@@ -994,9 +1024,12 @@ async function followingView(seq = renderSeq) {
   const nxt = s.next_cycle ? new Date(s.next_cycle * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "soon";
   const cycle = s.cycle_running ? "A refresh is running now."
     : s.last_cycle ? `Last full refresh ${agoText(s.last_cycle)}, next around ${nxt}.` : `First full refresh starts ${nxt}.`;
+  const paused = (ts, what) => `<br><b>${what} is rate-limiting.</b> Paused until ${hhmm(ts)}; saved posts still work.`;
   $("#status").innerHTML = `<b>${s.posts.toLocaleString()}</b> posts saved from <b>${s.following}</b> accounts. ${cycle}<br>
-    ${s.logged_in ? "Stories are on, using your burner session." : "Running logged out, so stories are off. Add a burner session above to turn them on."}
-    ${s.paused_until ? `<br><b>Instagram is rate-limiting.</b> Fetching is paused until ${new Date(s.paused_until * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}; saved posts still work.` : ""}`;
+    ${s.logged_in ? "The burner session is in use." : "Running logged out, so stories, highlights and restricted profiles are off."}
+    ${s.restricted ? `<br>${s.restricted} account${s.restricted === 1 ? "" : "s"} can only be fetched with the burner.` : ""}
+    ${s.anon_paused_until ? paused(s.anon_paused_until, "Instagram") : ""}
+    ${s.paused_until && !s.anon_paused_until ? paused(s.paused_until, "The burner") : ""}`;
 }
 
 async function profileView(username) {
@@ -1056,7 +1089,7 @@ async function profileView(username) {
     const fetched = !!a.fetched_at;
     $("#phead").innerHTML = `
       <img class="big-avatar" src="${esc(a.avatar || AVATAR_FALLBACK)}" alt="">
-      <div><h1>${esc(a.full_name || a.username)}</h1><div class="handle">@${esc(a.username)}${a.busy ? '<span class="dot-busy" title="Fetching"></span>' : ""}</div></div>
+      <div><h1>${esc(a.full_name || a.username)}</h1><div class="handle">@${esc(a.username)}${a.busy ? '<span class="dot-busy" title="Fetching"></span>' : ""}${a.restricted ? '<span class="tag-restricted" title="Age or region restricted">Restricted</span>' : ""}</div></div>
       <div class="stats">${fetched ? `<span><b>${num(a.post_count)}</b> posts</span><span><b>${num(a.followers)}</b> followers</span><span><b>${num(a.following)}</b> following</span>` : ""}</div>
       ${a.bio ? `<p class="bio">${esc(a.bio)}</p>` : ""}
       <div class="profile-actions">
@@ -1765,6 +1798,8 @@ document.addEventListener("keydown", (e) => {
    top of the feed on a phone, redraws from what's saved (no Instagram requests). */
 
 // Rate-limit pause, shown on every page: Instagram said "slow down" and Peek is waiting.
+// Anonymous fetching and the burner cool separately, so this tracks the anonymous path —
+// a rate-limited burner must not look like the whole app has stopped.
 let pauseTimer = 0;
 const hhmm = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 function paintPause(until) {
@@ -1781,7 +1816,7 @@ $("#pause-chip").addEventListener("click", () =>
   toast("Instagram asked Peek to slow down, so fetching is paused. Saved posts, stories and downloads still work."));
 const pollStatus = async () => {
   const r = await fetch("/api/status").catch(() => null);
-  if (r?.ok) { const st = await r.json(); paintPause(st.paused_until); return st; }
+  if (r?.ok) { const st = await r.json(); paintPause(st.anon_paused_until); return st; }
   return null;
 };
 setInterval(pollStatus, 60000);

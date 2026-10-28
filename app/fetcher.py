@@ -6,6 +6,8 @@ import hashlib
 import json
 import queue
 import zipfile
+from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 import logging
 import random
@@ -32,7 +34,8 @@ from instaloader.nodeiterator import FrozenNodeIterator, NodeIterator
 
 from . import db
 from .config import (
-    IG_CSRFTOKEN, IG_DID, IG_MID, IG_RUR, IG_SESSIONID, IG_USER, MAX_POSTS, MEDIA_DIR,
+    IG_CSRFTOKEN, IG_DID, IG_MID, IG_RUR, IG_SEARCH, IG_SESSIONID, IG_USER, MAX_POSTS, MEDIA_DIR,
+    REELS_TAB, SESSION_BUDGET_HOUR, SESSION_POLICY, STORIES_BATCHED,
 )
 
 log = logging.getLogger("peek.fetcher")
@@ -56,20 +59,21 @@ class FetchError(Exception):
 # ---------------------------------------------------------------- rate limits
 # Instaloader's own reaction to a 429 is to sleep 10+ minutes inside the request. Here that
 # would hold the global lock, freezing every refresh, hydration and "load older" while the
-# UI spins. Instead: fail fast, and pause all Instagram API calls until the window passes.
+# UI spins. Instead: fail fast, and cool whichever path hit the limit.
+#
+# The anonymous path and the burner cool *separately*, so a rate-limited burner never stops
+# public fetching, and a burst of public work never parks the session.
 
 COOLDOWN_MIN = 15 * 60
-_cooldown_until = 0.0
-
+_anon_cooldown = 0.0
+_session_cooldown = 0.0
 
 MAX_INLINE_WAIT = 5  # seconds Instaloader may pause between requests while we hold the lock
 
 
 class _PauseOn429(instaloader.RateController):
-    """Instaloader's limiter sleeps silently (we run it quiet) whenever it thinks we're near
-    Instagram's limits, for up to ~11 minutes, and it does so inside the request while Peek
-    holds its one Instagram lock. Short waits are fine; anything longer becomes a visible
-    pause instead, and a real 429 pauses everything for COOLDOWN_MIN."""
+    """Short limiter waits are fine; anything longer becomes a visible pause on whichever
+    loader is in use."""
 
     def wait_before_query(self, query_type: str) -> None:
         try:
@@ -77,7 +81,7 @@ class _PauseOn429(instaloader.RateController):
         except Exception:
             wait = 0.0
         if wait > MAX_INLINE_WAIT:
-            _start_cooldown(wait, f"staying under Instagram's request limits ({query_type})")
+            _cool(wait, f"staying under Instagram's limits ({query_type})")
             raise TooManyRequestsException("Paused to stay under Instagram's limits")
         super().wait_before_query(query_type)
 
@@ -86,30 +90,53 @@ class _PauseOn429(instaloader.RateController):
         # "earliest next request" timer, which is what caused the silent 11-minute sleeps.
         if getattr(_probe, "on", False):
             # A one-off lookup endpoint refused us. Instagram answers some endpoints with 429
-            # as a flat "no" even when we're nowhere near a limit, so this doesn't pause the rest.
+            # as a flat "no" even when we're nowhere near a limit, so this doesn't cool anything.
             raise TooManyRequestsException("429 Too Many Requests (lookup refused)")
-        _start_cooldown(COOLDOWN_MIN, f"Instagram returned 429 ({query_type})")
+        _cool(COOLDOWN_MIN, f"Instagram returned 429 ({query_type})")
         raise TooManyRequestsException("429 Too Many Requests")
 
 
 _probe = threading.local()
 
 
-def _start_cooldown(seconds: float, why: str):
-    global _cooldown_until
-    _cooldown_until = max(_cooldown_until, time.time() + seconds)
-    log.warning("pausing Instagram requests until %s: %s",
-                time.strftime("%H:%M", time.localtime(_cooldown_until)), why)
+def _cool(seconds: float, why: str):
+    """Cool whichever path is in use: burner and anonymous fetching are independent."""
+    global _anon_cooldown, _session_cooldown
+    until = time.time() + seconds
+    if getattr(_probe, "ctx", "anon") == "session":
+        _session_cooldown = max(_session_cooldown, until)
+        log.warning("burner cooling until %s: %s",
+                    time.strftime("%H:%M", time.localtime(_session_cooldown)), why)
+    else:
+        _anon_cooldown = max(_anon_cooldown, until)
+        log.info("anonymous fetching cooling until %s: %s",
+                 time.strftime("%H:%M", time.localtime(_anon_cooldown)), why)
+
+
+def _anon_blocked() -> float | None:
+    return _anon_cooldown if _anon_cooldown > time.time() else None
+
+
+def _session_blocked() -> float | None:
+    return _session_cooldown if _session_cooldown > time.time() else None
 
 
 def cooldown_until() -> float | None:
-    return _cooldown_until if _cooldown_until > time.time() else None
+    """Soonest time anything at all can run, for the UI banner."""
+    a, s = _anon_blocked(), _session_blocked()
+    return min(x for x in (a, s) if x) if (a or s) else None
 
 
-def _check_cooldown():
-    if _cooldown_until > time.time():
-        raise FetchError("Instagram is rate-limiting requests; paused until "
-                         + time.strftime("%H:%M", time.localtime(_cooldown_until)))
+def _check_anon():
+    if _anon_blocked():
+        raise FetchError("Instagram is rate-limiting; paused until "
+                         + time.strftime("%H:%M", time.localtime(_anon_blocked())))
+
+
+def _check_session():
+    if _session_blocked():
+        raise FetchError("The burner is rate-limited; paused until "
+                         + time.strftime("%H:%M", time.localtime(_session_blocked())))
 
 
 # ---------------------------------------------------------------- burner session
@@ -229,6 +256,22 @@ def _make_loader_plain(watch: bool = True) -> instaloader.Instaloader:
     return loader
 
 
+_anon = _make_loader_plain(watch=False)  # always logged out; never counts against the burner
+
+
+@contextmanager
+def _using(loader):
+    """Point L at a specific loader for the duration, tagging the rate-limit context with it."""
+    global L
+    prev, prev_ctx = L, getattr(_probe, "ctx", "anon")
+    L = loader
+    _probe.ctx = "anon" if loader is _anon else "session"
+    try:
+        yield
+    finally:
+        L, _probe.ctx = prev, prev_ctx
+
+
 def _make_loader() -> instaloader.Instaloader:
     """A loader for the stored session, or a logged-out one. A bad session never stops the app."""
     row = _session_row()
@@ -236,7 +279,6 @@ def _make_loader() -> instaloader.Instaloader:
         try:
             loader = _make_loader_plain()
             loader.load_session(row["username"] or IG_USER or "burner", _cookies(row))
-            log.info("using session for %s", row["username"] or IG_USER or "the burner")
             return loader
         except Exception as e:
             log.error("couldn't load the Instagram session (%s); running logged out", e)
@@ -253,21 +295,26 @@ def _make_loader() -> instaloader.Instaloader:
     return _make_loader_plain()
 
 
-L = _make_loader_plain()  # replaced by init_session() once the DB is ready
+def _session_loader() -> instaloader.Instaloader:
+    """The session loader, or a fresh one. Inside _using() the current L is reused."""
+    return L if L is not _anon else _make_loader()
+
+
+L = _anon  # session work always goes through _using(); the default is anonymous
 
 
 def _reload_loader():
-    """Rebuild the loader from the stored session and swap it in. Takes the Instagram lock so
-    nothing is halfway through a request sequence when the session changes under it."""
+    """Rebuild from the stored session so its state is logged. L itself always returns to
+    the anonymous loader; each operation picks a loader for itself."""
     global L
     new = _make_loader()
     with _lock:
-        L = new
+        L = _anon
     log.info("Instagram session: %s", "logged in" if new.context.is_logged_in else "logged out")
 
 
 def init_session():
-    """Seed the session from the env vars if they changed, then build the loader."""
+    """Seed the session from the env vars if they changed, then report the current state."""
     if IG_SESSIONID:
         sid = _clean_sessionid(IG_SESSIONID)
         h = hashlib.sha256(sid.encode()).hexdigest()[:16]
@@ -278,6 +325,47 @@ def init_session():
                            checked_at=None, last_error=None, source="env", env_hash=h, saved_at=time.time())
             log.info("session seeded from the environment")
     _reload_loader()
+
+
+# ---------------------------------------------------------------- session policy + budget
+# The burner is the scarce thing, so it is only spent where nothing else can work. Public
+# accounts are fetched anonymously. An account that turns out to be invisible anonymously is
+# flagged `restricted` and goes straight to the burner from then on.
+
+_session_hits: deque = deque()
+
+
+def _policy() -> str:
+    return db.get_setting("session_policy", SESSION_POLICY) or "restricted"
+
+
+def _spend():
+    now = time.time()
+    _session_hits.append(now)
+    while _session_hits and now - _session_hits[0] > 3600:
+        _session_hits.popleft()
+
+
+def _budget_left() -> int:
+    now = time.time()
+    while _session_hits and now - _session_hits[0] > 3600:
+        _session_hits.popleft()
+    return max(0, SESSION_BUDGET_HOUR - len(_session_hits))
+
+
+def _session_ready() -> bool:
+    row = _session_row() or {}
+    return (row.get("state") == "ok" and bool(row.get("sessionid"))
+            and not _session_blocked() and _budget_left() > 0)
+
+
+def _check_session_ready():
+    row = _session_row() or {}
+    if not (row.get("state") == "ok" and row.get("sessionid")):
+        raise FetchError("This needs the burner session and none is working. Add one on the Following page.")
+    _check_session()
+    if _budget_left() <= 0:
+        raise FetchError(f"The burner's hourly budget is spent ({SESSION_BUDGET_HOUR}). It resets as the hour rolls.")
 
 
 LIMITED_NOTE = ("Instagram answered with \"feedback_required\" (an activity limit), but it knows who the "
@@ -345,6 +433,8 @@ def session_info() -> dict:
         "source": row.get("source"),
         "hint": "…" + sid.replace("%3A", ":")[-4:] if sid else None,
         "has_device_cookies": bool(row.get("mid") or row.get("ig_did")),
+        "policy": _policy(),
+        "budget_left": _budget_left(),
     }
 
 
@@ -494,10 +584,10 @@ def _get_profile(username: str) -> instaloader.Profile:
     try:
         return instaloader.Profile.from_username(L.context, username)
     except ProfileNotExistsException:
-        if not logged_in():
+        if not logged_in() or L is _anon:
             raise
     except (BadResponseException, ConnectionException):
-        if not logged_in():
+        if not logged_in() or L is _anon:
             raise
 
     log.info("%s: not on the logged-out page; resolving it as the burner", username)
@@ -532,7 +622,8 @@ def _get_profile(username: str) -> instaloader.Profile:
 
 
 def logged_in() -> bool:
-    return L.context.is_logged_in
+    row = _session_row() or {}
+    return row.get("state") == "ok" and bool(row.get("sessionid"))
 
 
 def is_busy(username: str) -> bool:
@@ -684,7 +775,7 @@ def _store_node(username: str, node: dict, post, wrap) -> None:
         _store_post(username, post)
     elif "taken_at" in node and ("image_versions2" in node or "carousel_media" in node):
         _store_iphone(username, node)  # logged-in page data is complete: no extra request
-    elif logged_in():
+    elif logged_in() and L is not _anon:
         _store_post(username, wrap(node))
     else:
         _store_stub(username, node)
@@ -747,16 +838,17 @@ def _comments(post: instaloader.Post):
 
 
 def hydrate(sc: str) -> bool:
-    """Fetch full details for a stub post (one Instagram request). Returns True if done."""
+    """Fetch full details for a stub post (one Instagram request, anonymous). True if done."""
     row = db.one("SELECT username, detailed FROM posts WHERE shortcode=?", (sc,))
     if not row or row["detailed"] == 1:
         return bool(row)
-    _check_cooldown()
+    _check_anon()
     with _lock:
         if db.one("SELECT detailed FROM posts WHERE shortcode=?", (sc,))["detailed"] == 1:
             return True
         try:
-            post = instaloader.Post.from_shortcode(L.context, sc)
+            with _using(_anon):
+                post = instaloader.Post.from_shortcode(L.context, sc)
         except (QueryReturnedNotFoundException, BadResponseException):
             db.execute("UPDATE posts SET detailed=-1 WHERE shortcode=?", (sc,))  # deleted or unavailable
             return False
@@ -778,8 +870,8 @@ def hydrator_loop():
             _hydrate_wake.clear()
             _hydrate_wake.wait(300)
             continue
-        if cooldown_until():
-            time.sleep(max(5, _cooldown_until - time.time()))
+        if _anon_blocked():
+            time.sleep(max(5, _anon_blocked() - time.time()))
             continue
         try:
             hydrate(row["shortcode"])
@@ -921,41 +1013,88 @@ def _safe_ensure(sc, idx, poster):
         log.warning("download job %s/%s failed: %s", sc, idx, e)
 
 
+# ---------------------------------------------------------------- refresh
+
+
 def refresh_profile(username: str, with_stories: bool = True) -> dict:
-    """Fetch profile + recent posts (+ stories when logged in). Raises FetchError.
-    Returns once metadata is cached; media keeps downloading in the background."""
+    """Fetch profile + recent posts. Public accounts run anonymously; the burner is only
+    touched for accounts already known to need it, or when an anonymous try proves it does.
+    Raises FetchError."""
     username = username.lower().lstrip("@").strip()
-    _check_cooldown()
     # Mark busy *before* taking the lock: while another account holds it this one is
-    # queued, and is_busy() has to say so or /api/u will queue a duplicate task on
-    # every poll.
+    # queued, and is_busy() has to say so or /api/u will queue a duplicate task on every poll.
     _busy.add(username)
     try:
         with _lock:
             db.execute("INSERT INTO accounts (username, tried_at) VALUES (?,?) "
                        "ON CONFLICT(username) DO UPDATE SET tried_at=excluded.tried_at", (username, time.time()))
-            res = _refresh_locked(username, with_stories)
+            try:
+                res = _fetch_with_policy(username, with_stories)
+            except (ProfileNotExistsException, LookupRefused):
+                raise _report(username)
     finally:
         _busy.discard(username)
     res["queued"] = queue_downloads(username)
     return res
 
 
-def _refresh_locked(username: str, with_stories: bool) -> dict:
+def _report(username: str) -> FetchError:
+    msg = ("Not found, or restricted and the burner isn't usable right now" if logged_in()
+           else "Not found, or age/region restricted — add a burner session to see those")
+    _record_error(username, msg)
+    return FetchError(msg)
+
+
+def _fetch_with_policy(username: str, with_stories: bool) -> dict:
+    """Pick the cheapest path that can work. Raises ProfileNotExistsException / LookupRefused /
+    FetchError."""
+    acct = db.one("SELECT restricted, is_private FROM accounts WHERE username=?", (username,))
+    known = bool(acct and (acct["restricted"] or acct["is_private"]))
+
+    if _policy() == "off":
+        return _guarded(username, with_stories, session=False)
+
+    if known:
+        if not _session_ready():
+            raise LookupRefused("This account needs the burner and it isn't usable right now")
+        return _guarded(username, with_stories, session=True)
+
     try:
-        p = _get_profile(username)
-    except ProfileNotExistsException:
-        msg = ("Not found, or restricted and hidden from the burner" if logged_in()
-               else "Not found, or restricted (age/region) and hidden without a login")
-        _record_error(username, msg)
-        raise FetchError(msg)
-    except LookupRefused as e:
-        _record_error(username, str(e))
-        raise FetchError(str(e))
+        return _guarded(username, with_stories, session=False)
+    except (ProfileNotExistsException, LookupRefused):
+        if not _session_ready():
+            raise
+        if not (acct and acct["restricted"]):
+            log.info("%s: invisible anonymously; flagging it restricted", username)
+            db.execute("INSERT INTO accounts (username, restricted) VALUES (?,1) "
+                       "ON CONFLICT(username) DO UPDATE SET restricted=1", (username,))
+        return _guarded(username, with_stories, session=True)
+
+
+def _guarded(username: str, with_stories: bool, session: bool) -> dict:
+    try:
+        return _attempt(username, with_stories, session)
+    except (ProfileNotExistsException, LookupRefused):
+        raise
     except (LoginRequiredException, ConnectionException, BadResponseException) as e:
         msg = _friendly(e)
         _record_error(username, msg)
         raise FetchError(msg)
+
+
+def _attempt(username: str, with_stories: bool, session: bool) -> dict:
+    if session:
+        _check_session_ready()
+        _spend()
+        with _using(_session_loader()):
+            return _refresh_body(username, with_stories)
+    _check_anon()
+    with _using(_anon):
+        return _refresh_body(username, with_stories)
+
+
+def _refresh_body(username: str, with_stories: bool) -> dict:
+    p = _get_profile(username)  # ProfileNotExistsException / LookupRefused propagate
 
     # avatars are tiny; always re-pull so profile-pic changes show up
     avatar = _save(p.profile_pic_url, f"_avatars/{username}.jpg", force=True)
@@ -1012,16 +1151,20 @@ def _refresh_locked(username: str, with_stories: bool) -> dict:
             _save_cursor(username, it, reached_end)
 
     reels = 0
-    if logged_in() and (not p.is_private or p.followed_by_viewer):
+    if REELS_TAB and _session_ready() and (not p.is_private or p.followed_by_viewer):
         try:
-            reels = _reels_newest(username, p.userid)
+            _spend()
+            with _using(_session_loader()):
+                reels = _reels_newest(username, p.userid)
         except Exception as e:  # posts are what matter; the reels tab is a bonus
             log.warning("%s: reels tab failed: %s", username, e)
 
     stories = 0
-    if with_stories and logged_in():
+    if with_stories and not STORIES_BATCHED and _session_ready():
         try:
-            stories = _refresh_stories(username, p.userid)
+            _spend()
+            with _using(_session_loader()):
+                stories = _refresh_stories(username, p.userid)
         except Exception as e:
             log.warning("%s: stories failed: %s", username, e)
 
@@ -1076,9 +1219,9 @@ def _save_cursor(username: str, it, done: bool, tab: str = "posts"):
 
 def load_older(username: str, count: int = 12) -> dict:
     """Fetch the next `count` uncached posts further back in an account's history,
-    resuming from the saved position. Raises FetchError."""
+    resuming from the saved position. Anonymous unless the account needs the burner.
+    Raises FetchError."""
     username = username.lower().lstrip("@").strip()
-    _check_cooldown()
     _busy.add(username)
     try:
         with _lock:
@@ -1090,52 +1233,63 @@ def load_older(username: str, count: int = 12) -> dict:
 
 
 def _load_older_locked(username: str, count: int) -> dict:
-    acct = db.one("SELECT cursor, history_done FROM accounts WHERE username=?", (username,))
+    acct = db.one("SELECT cursor, history_done, restricted, is_private FROM accounts WHERE username=?", (username,))
     if acct and acct["history_done"]:
         return {"added": 0, "done": True, "note": None, "codes": []}
-    try:
-        p = _get_profile(username)
-    except ProfileNotExistsException:
-        raise FetchError("Not found, or restricted and hidden from this session")
-    except LookupRefused as e:
-        raise FetchError(str(e))
-    except (LoginRequiredException, ConnectionException, BadResponseException) as e:
-        raise FetchError(_friendly(e))
-    if p.is_private and not p.followed_by_viewer:
-        raise FetchError("This account is private")
+    need_session = bool(acct and (acct["restricted"] or acct["is_private"]))
 
-    it, wrap = _walk(p)
-    if acct and acct["cursor"]:
+    if need_session:
+        _check_session_ready()
+        _spend()
+        loader = _session_loader()
+    else:
+        _check_anon()
+        loader = _anon
+
+    with _using(loader):
         try:
-            it.thaw(FrozenNodeIterator(**json.loads(acct["cursor"])))
-        except Exception as e:
-            # Stale or from a different login state: walk from the top instead. Cached
-            # posts are skipped by shortcode, so that only costs page requests.
-            log.info("%s: saved position unusable (%s); walking from the newest post", username, e)
-            it, wrap = _walk(p)
+            p = _get_profile(username)
+        except ProfileNotExistsException:
+            raise FetchError("Not found, or restricted and hidden from this session")
+        except LookupRefused as e:
+            raise FetchError(str(e))
+        except (LoginRequiredException, ConnectionException, BadResponseException) as e:
+            raise FetchError(_friendly(e))
+        if p.is_private and not p.followed_by_viewer:
+            raise FetchError("This account is private")
 
-    added, done, note, codes = 0, False, None, []
-    try:
-        while added < count:
+        it, wrap = _walk(p)
+        if acct and acct["cursor"]:
             try:
-                node = next(it)
-            except StopIteration:
-                done = True
-                break
-            code, post = _code(node, wrap)
-            if _cached(code):
-                if _on_grid(code):
-                    codes.append(code)  # was showing under Reels only; now on the posts grid too
-                continue
-            _store_node(username, node, post, wrap)
-            codes.append(code)
-            added += 1
-    except (LoginRequiredException, ConnectionException, QueryReturnedNotFoundException,
-            BadResponseException) as e:
-        note = _friendly(e)
-        log.info("%s: load older stopped: %s", username, note)
-    _save_cursor(username, it, done)
-    return {"added": added, "done": done, "note": note, "codes": codes}
+                it.thaw(FrozenNodeIterator(**json.loads(acct["cursor"])))
+            except Exception as e:
+                # Stale or from a different login state: walk from the top instead. Cached
+                # posts are skipped by shortcode, so that only costs page requests.
+                log.info("%s: saved position unusable (%s); walking from the newest post", username, e)
+                it, wrap = _walk(p)
+
+        added, done, note, codes = 0, False, None, []
+        try:
+            while added < count:
+                try:
+                    node = next(it)
+                except StopIteration:
+                    done = True
+                    break
+                code, post = _code(node, wrap)
+                if _cached(code):
+                    if _on_grid(code):
+                        codes.append(code)  # was showing under Reels only; now on the posts grid too
+                    continue
+                _store_node(username, node, post, wrap)
+                codes.append(code)
+                added += 1
+        except (LoginRequiredException, ConnectionException, QueryReturnedNotFoundException,
+                BadResponseException) as e:
+            note = _friendly(e)
+            log.info("%s: load older stopped: %s", username, note)
+        _save_cursor(username, it, done)
+        return {"added": added, "done": done, "note": note, "codes": codes}
 
 
 # ---------------------------------------------------------------- the Reels tab
@@ -1220,13 +1374,13 @@ def load_older_reels(username: str, count: int = 12) -> dict:
     """Fetch the next `count` reels Peek doesn't have yet from an account's Reels tab.
     Needs the burner session. Raises FetchError."""
     username = username.lower().lstrip("@").strip()
-    if not logged_in():
-        raise FetchError("Instagram only shows the Reels tab with a login. Add a burner session to load it.")
-    _check_cooldown()
     _busy.add(username)
     try:
         with _lock:
-            res = _load_older_reels_locked(username, count)
+            _check_session_ready()
+            _spend()
+            with _using(_session_loader()):
+                res = _load_older_reels_locked(username, count)
     finally:
         _busy.discard(username)
     queue_downloads(username)
@@ -1285,10 +1439,14 @@ def search_instagram(q: str) -> list[dict]:
     hit = _search_cache.get(key)
     if hit and time.time() - hit[0] < SEARCH_TTL:
         return hit[1]
+    if not IG_SEARCH:
+        raise SearchUnavailable("off", "Instagram suggestions are switched off")
     if not logged_in():
-        raise SearchUnavailable("off", "Instagram search needs the burner session")
-    if cooldown_until():
-        raise SearchUnavailable("paused", "Suggestions paused while Instagram is rate-limiting")
+        raise SearchUnavailable("off", "Instagram search needs a burner session")
+    if _session_blocked():
+        raise SearchUnavailable("paused", "Suggestions paused while the burner is rate-limiting")
+    if _budget_left() <= 0:
+        raise SearchUnavailable("limit", "Suggestions paused: hourly burner budget is spent")
     now = time.time()
     _search_times[:] = [t for t in _search_times if now - t < 3600]
     if len(_search_times) >= SEARCH_PER_HOUR:
@@ -1296,27 +1454,30 @@ def search_instagram(q: str) -> list[dict]:
     _search_times.append(now)
     global _search_path
     with _lock:
-        _probe.on = True  # a refused search shouldn't pause everything else
-        try:
-            node = None
-            paths = [_search_path] + [p for p in SEARCH_PATHS if p != _search_path]
-            for path in paths:
-                try:
-                    node = L.context.get_json(path, params={"context": "blended", "query": key,
-                                                            "include_reel": "false", "__a": 1})
-                    _search_path = path  # remember the one that works
-                    break
-                except QueryReturnedNotFoundException:
-                    log.info("search endpoint %s is gone (404); trying the next one", path)
-            if node is None:
-                raise SearchUnavailable("error", "Instagram's search endpoints aren't answering; search is off for now")
-        except SearchUnavailable:
-            raise
-        except Exception as e:
-            raise SearchUnavailable("error", "Instagram refused the search right now" if "429" in str(e)
-                                    else f"Search failed: {str(e)[:120]}")
-        finally:
-            _probe.on = False
+        _check_session_ready()
+        _spend()
+        with _using(_session_loader()):
+            _probe.on = True  # a refused search shouldn't cool the whole burner
+            try:
+                node = None
+                paths = [_search_path] + [p for p in SEARCH_PATHS if p != _search_path]
+                for path in paths:
+                    try:
+                        node = L.context.get_json(path, params={"context": "blended", "query": key,
+                                                                "include_reel": "false", "__a": 1})
+                        _search_path = path  # remember the one that works
+                        break
+                    except QueryReturnedNotFoundException:
+                        log.info("search endpoint %s is gone (404); trying the next one", path)
+                if node is None:
+                    raise SearchUnavailable("error", "Instagram's search endpoints aren't answering; search is off for now")
+            except SearchUnavailable:
+                raise
+            except Exception as e:
+                raise SearchUnavailable("error", "Instagram refused the search right now" if "429" in str(e)
+                                        else f"Search failed: {str(e)[:120]}")
+            finally:
+                _probe.on = False
     users = []
     for item in (node.get("users") or [])[:12]:
         u = item.get("user") or item  # {"user": {...}} or a bare user, depending on the endpoint
@@ -1355,7 +1516,7 @@ HIGHLIGHTS_TTL = 24 * 3600
 
 def highlights_due(username: str) -> bool:
     a = db.one("SELECT userid, highlights_at FROM accounts WHERE username=?", (username,))
-    return bool(logged_in() and a and a["userid"] and not cooldown_until()
+    return bool(_session_ready() and a and a["userid"]
                 and (not a["highlights_at"] or time.time() - a["highlights_at"] > HIGHLIGHTS_TTL))
 
 
@@ -1363,34 +1524,36 @@ def refresh_highlights(username: str) -> int:
     """Fetch an account's highlight list (one request). Items are fetched per highlight
     when first opened. Raises FetchError."""
     a = db.one("SELECT userid FROM accounts WHERE username=?", (username,))
-    if not (logged_in() and a and a["userid"]):
+    if not (a and a["userid"]):
         return 0
-    _check_cooldown()
+    _check_session_ready()
     with _lock:
-        try:
-            found = list(L.get_highlights(int(a["userid"])))
-        except Exception as e:
-            raise FetchError(_friendly(e))
-        rows = []
-        for pos, h in enumerate(found):
+        _spend()
+        with _using(_session_loader()):
             try:
-                cover = h._node.get("cover_media_cropped_thumbnail", {}).get("url") or h.cover_url
-            except Exception:
-                cover = None
-            rows.append((str(h.unique_id), username, h.title, cover, pos))
-        ids = [r[0] for r in rows]
-        with db.conn() as c:
-            c.executemany(
-                """INSERT INTO highlights (id, username, title, cover_url, position) VALUES (?,?,?,?,?)
-                   ON CONFLICT(id) DO UPDATE SET title=excluded.title, cover_url=excluded.cover_url,
-                     position=excluded.position""", rows)
-            marks = ",".join("?" * len(ids)) or "''"
-            gone = c.execute(f"SELECT id FROM highlights WHERE username=? AND id NOT IN ({marks})",
-                             (username, *ids)).fetchall()
-            for (hid,) in gone:
-                c.execute("DELETE FROM highlight_items WHERE highlight_id=?", (hid,))
-                c.execute("DELETE FROM highlights WHERE id=?", (hid,))
-            c.execute("UPDATE accounts SET highlights_at=? WHERE username=?", (time.time(), username))
+                found = list(L.get_highlights(int(a["userid"])))
+            except Exception as e:
+                raise FetchError(_friendly(e))
+            rows = []
+            for pos, h in enumerate(found):
+                try:
+                    cover = h._node.get("cover_media_cropped_thumbnail", {}).get("url") or h.cover_url
+                except Exception:
+                    cover = None
+                rows.append((str(h.unique_id), username, h.title, cover, pos))
+            ids = [r[0] for r in rows]
+            with db.conn() as c:
+                c.executemany(
+                    """INSERT INTO highlights (id, username, title, cover_url, position) VALUES (?,?,?,?,?)
+                       ON CONFLICT(id) DO UPDATE SET title=excluded.title, cover_url=excluded.cover_url,
+                         position=excluded.position""", rows)
+                marks = ",".join("?" * len(ids)) or "''"
+                gone = c.execute(f"SELECT id FROM highlights WHERE username=? AND id NOT IN ({marks})",
+                                 (username, *ids)).fetchall()
+                for (hid,) in gone:
+                    c.execute("DELETE FROM highlight_items WHERE highlight_id=?", (hid,))
+                    c.execute("DELETE FROM highlights WHERE id=?", (hid,))
+                c.execute("UPDATE accounts SET highlights_at=? WHERE username=?", (time.time(), username))
     return len(rows)
 
 
@@ -1401,34 +1564,36 @@ def highlight_items(hid: str) -> list[dict]:
     if not h:
         return []
     fresh = h["items_at"] and time.time() - h["items_at"] < HIGHLIGHTS_TTL
-    if not fresh and logged_in():
-        _check_cooldown()
+    if not fresh and _session_ready():
+        _check_session_ready()
         with _lock:
-            try:
-                owner = instaloader.Profile(L.context, {"id": h["userid"], "username": h["username"]})
-                hl = instaloader.Highlight(L.context, {"id": hid, "title": h["title"]}, owner)
-                hl._fetch_items()
-                hl._fetch_iphone_struct()
-            except Exception as e:
-                if not db.one("SELECT 1 AS x FROM highlight_items WHERE highlight_id=?", (hid,)):
-                    raise FetchError(_friendly(e))
-                hl = None  # keep showing what we already have
-            if hl is not None:
-                iph = {str(it.get("pk")): it for it in (hl._iphone_struct_ or {}).get("items", [])}
-                rows = []
-                for pos, it in enumerate(hl._items or []):
-                    full = iph.get(str(it["id"]), {})
-                    video = bool(it.get("is_video"))
-                    imgs = (full.get("image_versions2") or {}).get("candidates")
-                    img = _best(imgs) or ((it.get("display_resources") or [{}])[-1].get("src")) or it.get("display_url")
-                    vid = (_best(full.get("video_versions")) or ((it.get("video_resources") or [{}])[-1].get("src"))) if video else None
-                    rows.append((str(it["id"]), hid, pos, it.get("taken_at_timestamp"), int(video), vid or img, img))
-                with db.conn() as c:
-                    c.executemany(
-                        """INSERT INTO highlight_items (id, highlight_id, position, taken_at, is_video, url, poster_url)
-                           VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET position=excluded.position,
-                             url=excluded.url, poster_url=excluded.poster_url""", rows)
-                    c.execute("UPDATE highlights SET items_at=? WHERE id=?", (time.time(), hid))
+            _spend()
+            with _using(_session_loader()):
+                try:
+                    owner = instaloader.Profile(L.context, {"id": h["userid"], "username": h["username"]})
+                    hl = instaloader.Highlight(L.context, {"id": hid, "title": h["title"]}, owner)
+                    hl._fetch_items()
+                    hl._fetch_iphone_struct()
+                except Exception as e:
+                    if not db.one("SELECT 1 AS x FROM highlight_items WHERE highlight_id=?", (hid,)):
+                        raise FetchError(_friendly(e))
+                    hl = None  # keep showing what we already have
+                if hl is not None:
+                    iph = {str(it.get("pk")): it for it in (hl._iphone_struct_ or {}).get("items", [])}
+                    rows = []
+                    for pos, it in enumerate(hl._items or []):
+                        full = iph.get(str(it["id"]), {})
+                        video = bool(it.get("is_video"))
+                        imgs = (full.get("image_versions2") or {}).get("candidates")
+                        img = _best(imgs) or ((it.get("display_resources") or [{}])[-1].get("src")) or it.get("display_url")
+                        vid = (_best(full.get("video_versions")) or ((it.get("video_resources") or [{}])[-1].get("src"))) if video else None
+                        rows.append((str(it["id"]), hid, pos, it.get("taken_at_timestamp"), int(video), vid or img, img))
+                    with db.conn() as c:
+                        c.executemany(
+                            """INSERT INTO highlight_items (id, highlight_id, position, taken_at, is_video, url, poster_url)
+                               VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET position=excluded.position,
+                                 url=excluded.url, poster_url=excluded.poster_url""", rows)
+                        c.execute("UPDATE highlights SET items_at=? WHERE id=?", (time.time(), hid))
     return db.rows("SELECT * FROM highlight_items WHERE highlight_id=? ORDER BY position", (hid,))
 
 
@@ -1460,6 +1625,9 @@ def ensure_highlight_file(kind: str, key: str) -> str | None:
     return rel
 
 
+# ---------------------------------------------------------------- stories
+
+
 def _refresh_stories(username: str, userid: int) -> int:
     count = 0
     for story in L.get_stories(userids=[userid]):
@@ -1477,6 +1645,38 @@ def _refresh_stories(username: str, userid: int) -> int:
                  int(item.is_video), path, poster),
             )
             count += 1
+    return count
+
+
+def refresh_all_stories() -> int:
+    """One request for every followed account's stories, instead of one request per account.
+    Run once per cycle. Raises FetchError."""
+    if not _session_ready():
+        return 0
+    followed = {r["username"] for r in db.rows("SELECT username FROM accounts WHERE followed=1 AND muted=0")}
+    if not followed:
+        return 0
+    _check_session_ready()
+    count = 0
+    with _lock:
+        _spend()
+        with _using(_session_loader()):
+            for story in L.get_stories():  # no userids: the whole tray
+                owner = (story.owner_username or "").lower()
+                if owner not in followed:
+                    continue
+                for item in story.get_items():
+                    sid = str(item.mediaid)
+                    if db.one("SELECT id FROM stories WHERE id=?", (sid,)):
+                        continue
+                    base = f"{owner}/stories/{sid}"
+                    path = _save(item.video_url if item.is_video else item.url,
+                                 f"{base}.{'mp4' if item.is_video else 'jpg'}", fix=not item.is_video)
+                    poster = _save(item.url, f"{base}_poster.jpg") if item.is_video else path
+                    db.execute("INSERT OR REPLACE INTO stories VALUES (?,?,?,?,?,?,?)",
+                               (sid, owner, item.date_utc.timestamp(), item.expiring_utc.timestamp(),
+                                int(item.is_video), path, poster))
+                    count += 1
     return count
 
 
@@ -1580,6 +1780,7 @@ def keep_post(sc: str, only: int | None = None):
 
 def media_exists(rel: str | None) -> bool:
     return bool(rel) and (MEDIA_DIR / rel).exists()
+
 
 # ---------------------------------------------------------------- zip downloads
 # Built in a worker thread and streamed out through a small queue, so a multi-GB profile

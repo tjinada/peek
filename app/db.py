@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     reels_cursor TEXT,             -- same as cursor, for the account's Reels tab
     reels_done   INTEGER DEFAULT 0,
     muted        INTEGER DEFAULT 0, -- still refreshed, but kept out of Feed, Reels and stories
-    viewed_at    REAL              -- last time its profile was opened: posts after this are "new"
+    viewed_at    REAL,             -- last time its profile was opened: posts after this are "new"
+    restricted   INTEGER DEFAULT 0  -- only visible with a login (age/region gated)
 );
 CREATE TABLE IF NOT EXISTS posts (
     shortcode  TEXT PRIMARY KEY,
@@ -62,6 +63,7 @@ CREATE TABLE IF NOT EXISTS stories (
 );
 CREATE TABLE IF NOT EXISTS seen_stories (id TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value REAL);
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS saved (shortcode TEXT PRIMARY KEY, saved_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS saved_slides (
     shortcode TEXT NOT NULL,
@@ -112,18 +114,23 @@ CREATE TABLE IF NOT EXISTS account_groups (
 );
 """
 
+MIGRATIONS = (
+    ("media", "url", "TEXT"), ("media", "poster_url", "TEXT"),
+    ("accounts", "cursor", "TEXT"), ("accounts", "history_done", "INTEGER DEFAULT 0"),
+    ("posts", "thumb_url", "TEXT"), ("posts", "detailed", "INTEGER DEFAULT 1"),
+    ("accounts", "tried_at", "REAL"), ("accounts", "highlights_at", "REAL"),
+    ("posts", "reels_only", "INTEGER DEFAULT 0"),
+    ("accounts", "reels_cursor", "TEXT"), ("accounts", "reels_done", "INTEGER DEFAULT 0"),
+    ("accounts", "muted", "INTEGER DEFAULT 0"), ("accounts", "viewed_at", "REAL"),
+    ("accounts", "restricted", "INTEGER DEFAULT 0"),
+)
+
 
 def init():
     with conn() as c:
         c.executescript(SCHEMA)
         # bring databases from earlier versions up to date
-        for table, col, decl in (("media", "url", "TEXT"), ("media", "poster_url", "TEXT"),
-                                 ("accounts", "cursor", "TEXT"), ("accounts", "history_done", "INTEGER DEFAULT 0"),
-                                 ("posts", "thumb_url", "TEXT"), ("posts", "detailed", "INTEGER DEFAULT 1"),
-                                 ("accounts", "tried_at", "REAL"), ("accounts", "highlights_at", "REAL"),
-                                 ("posts", "reels_only", "INTEGER DEFAULT 0"),
-                                 ("accounts", "reels_cursor", "TEXT"), ("accounts", "reels_done", "INTEGER DEFAULT 0"),
-                                 ("accounts", "muted", "INTEGER DEFAULT 0"), ("accounts", "viewed_at", "REAL")):
+        for table, col, decl in MIGRATIONS:
             if col not in {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
                 if col == "viewed_at":  # start unread counts from now, not from every post ever saved
@@ -165,3 +172,13 @@ def get_meta(key: str) -> float | None:
 def set_meta(key: str, value: float):
     execute("INSERT INTO meta (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, value))
+
+
+def get_setting(key: str, default=None):
+    r = one("SELECT value FROM settings WHERE key=?", (key,))
+    return r["value"] if r else default
+
+
+def set_setting(key: str, value: str):
+    execute("INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, str(value)))

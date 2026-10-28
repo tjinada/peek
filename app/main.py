@@ -19,7 +19,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 from . import db, fetcher  # noqa: E402
-from .config import ACCOUNT_DELAY, MEDIA_DIR, PEEK_PASSWORD, PROFILE_TTL_HOURS, REFRESH_HOURS  # noqa: E402
+from .config import (  # noqa: E402
+    ACCOUNT_DELAY, MEDIA_DIR, PEEK_PASSWORD, PROFILE_TTL_HOURS, REFRESH_HOURS, STORIES_BATCHED,
+)
 
 log = logging.getLogger("peek")
 STATIC = Path(__file__).resolve().parent.parent / "static"
@@ -58,6 +60,12 @@ async def refresh_cycle(group: int | None = None):
             if i < len(names) - 1:
                 await asyncio.sleep(random.uniform(*ACCOUNT_DELAY))
         if not group:
+            if STORIES_BATCHED:  # one tray request instead of one per account
+                try:
+                    n = await asyncio.to_thread(fetcher.refresh_all_stories)
+                    log.info("stories tray: %s new", n)
+                except fetcher.FetchError as e:
+                    log.info("stories tray skipped: %s", e)
             await asyncio.to_thread(fetcher.prune_expired_stories)
             state["last_cycle"] = time.time()
             db.set_meta("last_cycle", state["last_cycle"])
@@ -95,7 +103,7 @@ async def session_watch():
     while True:
         try:
             s = fetcher.session_info()
-            due = (s["configured"] and s["state"] != "dead" and not fetcher.cooldown_until()
+            due = (s["configured"] and s["state"] != "dead" and not fetcher._session_blocked()
                    and (not s["checked_at"] or time.time() - s["checked_at"] > SESSION_CHECK_HOURS * 3600))
             if due:
                 s = await asyncio.to_thread(fetcher.test_login)
@@ -169,6 +177,7 @@ def _account_out(a: dict) -> dict:
     a["is_private"] = bool(a.get("is_private"))
     a["history_done"] = bool(a.get("history_done"))
     a["muted"] = bool(a.get("muted"))
+    a["restricted"] = bool(a.get("restricted"))
     a.pop("cursor", None)  # internal; can be large
     a.pop("reels_cursor", None)
     return a
@@ -224,7 +233,8 @@ def _stale(a: dict | None) -> bool:
     poll. The Refresh button still forces one."""
     if a and a.get("tried_at") and time.time() - a["tried_at"] < RETRY_AFTER:
         return False
-    if fetcher.cooldown_until():  # paused: don't queue a fetch that would just fail
+    # a first attempt is anonymous, so anonymous pausing is what matters here
+    if fetcher._anon_blocked():
         return False
     return not a or not a.get("fetched_at") or time.time() - a["fetched_at"] > PROFILE_TTL_HOURS * 3600
 
@@ -253,12 +263,16 @@ def status():
     counts = db.one(
         "SELECT (SELECT COUNT(*) FROM accounts WHERE followed=1) AS following,"
         "       (SELECT COUNT(*) FROM posts) AS posts,"
-        "       (SELECT COUNT(*) FROM stories) AS stories"
+        "       (SELECT COUNT(*) FROM stories) AS stories,"
+        "       (SELECT COUNT(*) FROM accounts WHERE restricted=1) AS restricted"
     )
     return {
         "logged_in": fetcher.logged_in(),
         "session": fetcher.session_info(),
+        "session_policy": fetcher._policy(),
+        "session_budget_left": fetcher._budget_left(),
         "paused_until": fetcher.cooldown_until(),
+        "anon_paused_until": fetcher._anon_blocked(),
         "password": bool(PEEK_PASSWORD),
         "refresh_hours": REFRESH_HOURS,
         **state,
@@ -297,6 +311,20 @@ async def check_session():
 async def delete_session():
     await asyncio.to_thread(fetcher.clear_session)
     return fetcher.session_info()
+
+
+class Policy(BaseModel):
+    policy: str  # off | restricted | always
+
+
+@app.put("/api/session/policy")
+def set_policy(body: Policy):
+    """How the burner is spent. "restricted" is the default and the cheapest useful setting."""
+    if body.policy not in ("off", "restricted", "always"):
+        raise HTTPException(400, "policy must be off, restricted or always")
+    db.set_setting("session_policy", body.policy)
+    log.info("session policy set to %s", body.policy)
+    return {"policy": body.policy}
 
 
 @app.get("/api/feed")
@@ -584,7 +612,8 @@ def profile(username: str, bg: BackgroundTasks, before: float | None = None, kin
     acct["cached"] = db.one("SELECT COUNT(*) AS n FROM posts WHERE username=? AND reels_only=0", (u,))["n"]
     acct["reels_tab"] = fetcher.logged_in()  # the Reels tab listing needs the burner session
     sess = fetcher.session_info()
-    acct["session"] = {"state": sess["state"], "error": sess["error"]}  # for the expired-session banner
+    acct["session"] = {"state": sess["state"], "error": sess["error"],
+                       "policy": sess["policy"], "budget_left": sess["budget_left"]}
     return {"account": acct, "posts": posts, "next": posts[-1]["taken_at"] if len(posts) == 60 else None}
 
 

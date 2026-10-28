@@ -17,7 +17,7 @@ MAX_POSTS = int(os.getenv("PEEK_MAX_POSTS", "24"))
 # Pause between accounts during a background refresh (seconds, randomised).
 ACCOUNT_DELAY = (float(os.getenv("PEEK_DELAY_MIN", "20")), float(os.getenv("PEEK_DELAY_MAX", "60")))
 
-# Optional burner session — enables stories, private-follow and deeper history.
+# Optional burner session — enables stories, private-follow and restricted profiles.
 IG_USER = os.getenv("IG_USER", "").strip()
 IG_SESSIONID = os.getenv("IG_SESSIONID", "").strip()
 IG_CSRFTOKEN = os.getenv("IG_CSRFTOKEN", "").strip()  # optional; a random one is used if blank
@@ -29,6 +29,23 @@ IG_CSRFTOKEN = os.getenv("IG_CSRFTOKEN", "").strip()  # optional; a random one i
 IG_MID = os.getenv("IG_MID", "").strip()
 IG_DID = os.getenv("IG_DID", "").strip()
 IG_RUR = os.getenv("IG_RUR", "").strip()
+
+# How the burner is spent. "restricted" (default): only accounts flagged age/region
+# restricted or private, plus features that cannot work without a login. "off": never,
+# restricted profiles simply fail. "always": every request uses it.
+SESSION_POLICY = os.getenv("PEEK_SESSION_POLICY", "restricted")
+
+# Ceiling on session-attributed operations per hour. Public work carries on past it;
+# restricted accounts wait for the hour to roll.
+SESSION_BUDGET_HOUR = int(os.getenv("PEEK_SESSION_BUDGET_HOUR", "300"))
+
+# Fetch the whole followed-stories tray in one request per cycle, instead of one
+# request per account per refresh.
+STORIES_BATCHED = os.getenv("PEEK_STORIES_BATCHED", "1") != "0"
+
+# These two need a login and are the most disposable features. Turn off to spend nothing.
+REELS_TAB = os.getenv("PEEK_REELS_TAB", "1") != "0"
+IG_SEARCH = os.getenv("PEEK_IG_SEARCH", "1") != "0"
 
 # Optional shared password for the web UI (handy if it's reachable beyond your LAN).
 PEEK_PASSWORD = os.getenv("PEEK_PASSWORD", "")

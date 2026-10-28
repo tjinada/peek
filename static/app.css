@@ -474,3 +474,12 @@ a.tag:hover { text-decoration: underline; }
   color: var(--muted); font-size: 0.6875rem; font-weight: 600; line-height: 1.5; vertical-align: 1px; }
 .people li.is-muted .avatar { opacity: .55; }
 .profile-actions #mute[aria-pressed="true"] { color: var(--muted); }
+
+.tag-restricted {
+  font-size: 11px; padding: 1px 6px; border-radius: 999px;
+  background: #3a2f1c; color: #e8c884; border: 1px solid #55401f;
+  vertical-align: 1px; margin-left: 6px;
+}
+.tag-restricted::before { content: "🔒"; margin-right: 3px; }
+
+[data-policy] { margin-bottom: 4px; }
