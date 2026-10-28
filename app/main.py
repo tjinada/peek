@@ -168,7 +168,9 @@ def _account_out(a: dict) -> dict:
     a["followed"] = bool(a.get("followed"))
     a["is_private"] = bool(a.get("is_private"))
     a["history_done"] = bool(a.get("history_done"))
+    a["muted"] = bool(a.get("muted"))
     a.pop("cursor", None)  # internal; can be large
+    a.pop("reels_cursor", None)
     return a
 
 
@@ -302,7 +304,7 @@ def feed(before: float | None = None, limit: int = 18, kind: str | None = None, 
     limit = max(1, min(limit, 60))
     sql = """SELECT p.*, a.avatar, a.full_name FROM posts p
              JOIN accounts a ON a.username = p.username
-             WHERE a.followed = 1"""
+             WHERE a.followed = 1 AND a.muted = 0"""
     args: list = []
     if group:
         sql += " AND p.username IN (SELECT username FROM account_groups WHERE group_id = ?)"
@@ -326,7 +328,7 @@ def feed_new(since: float, kind: str | None = None, group: int | None = None):
     """How many feed posts are newer than the newest one on screen. Local only, so the feed
     can poll it cheaply and offer a 'new posts' pill. Also says if a refresh is running."""
     sql = """SELECT COUNT(*) AS n FROM posts p JOIN accounts a ON a.username = p.username
-             WHERE a.followed = 1 AND p.taken_at > ?"""
+             WHERE a.followed = 1 AND a.muted = 0 AND p.taken_at > ?"""
     args: list = [since]
     if group:
         sql += " AND p.username IN (SELECT username FROM account_groups WHERE group_id = ?)"
@@ -356,7 +358,7 @@ def stories(group: int | None = None):
         """SELECT s.*, a.avatar, (ss.id IS NOT NULL) AS seen FROM stories s
            JOIN accounts a ON a.username = s.username
            LEFT JOIN seen_stories ss ON ss.id = s.id
-           WHERE a.followed = 1 AND s.expires_at > ? AND s.path IS NOT NULL"""
+           WHERE a.followed = 1 AND a.muted = 0 AND s.expires_at > ? AND s.path IS NOT NULL"""
         + (" AND s.username IN (SELECT username FROM account_groups WHERE group_id = ?)" if group else "")
         + " ORDER BY s.taken_at",
         (now, group) if group else (now,),
@@ -389,7 +391,9 @@ def stories_seen(body: Seen):
 @app.get("/api/accounts")
 def accounts():
     rows = db.rows(
-        """SELECT a.*, (SELECT MAX(taken_at) FROM posts p WHERE p.username=a.username) AS latest_post
+        """SELECT a.*, (SELECT MAX(taken_at) FROM posts p WHERE p.username=a.username) AS latest_post,
+                  (SELECT COUNT(*) FROM posts p WHERE p.username=a.username AND p.taken_at > COALESCE(a.viewed_at, 0)
+                     AND a.viewed_at IS NOT NULL) AS unread
            FROM accounts a WHERE followed=1 ORDER BY username"""
     )
     member: dict[str, list[int]] = {}
@@ -461,7 +465,9 @@ class Follow(BaseModel):
 def follow(body: Follow, bg: BackgroundTasks):
     u = _clean(body.username)
     db.execute(
-        "INSERT INTO accounts (username, followed) VALUES (?,1) ON CONFLICT(username) DO UPDATE SET followed=1", (u,)
+        "INSERT INTO accounts (username, followed, viewed_at) VALUES (?,1,?) "
+        "ON CONFLICT(username) DO UPDATE SET followed=1, viewed_at=COALESCE(accounts.viewed_at, excluded.viewed_at)",
+        (u, time.time())
     )
     a = db.one("SELECT * FROM accounts WHERE username=?", (u,))
     if _stale(a) and not fetcher.is_busy(u):
@@ -479,9 +485,21 @@ def unfollow(username: str, purge: bool = False):
     return {"ok": True}
 
 
+class Mute(BaseModel):
+    muted: bool
+
+
+@app.put("/api/accounts/{username}/mute")
+def mute(username: str, body: Mute):
+    """Muted accounts keep refreshing but stay out of Feed, Reels and stories."""
+    u = _clean(username)
+    db.execute("UPDATE accounts SET muted=? WHERE username=?", (int(body.muted), u))
+    return {"username": u, "muted": body.muted}
+
+
 class Bulk(BaseModel):
     usernames: list[str]
-    action: str                 # unfollow | add_group | remove_group
+    action: str                 # unfollow | add_group | remove_group | mute | unmute
     group_id: int | None = None
     purge: bool = False         # unfollow: also delete what Peek saved for them
 
@@ -500,6 +518,10 @@ def bulk(body: Bulk):
             else:
                 c.executemany("DELETE FROM account_groups WHERE username=? AND group_id=?",
                               [(u, body.group_id) for u in users])
+    elif body.action in ("mute", "unmute"):
+        with db.conn() as c:
+            c.executemany("UPDATE accounts SET muted=? WHERE username=?",
+                          [(int(body.action == "mute"), u) for u in users])
     elif body.action == "unfollow":
         for u in users:
             if body.purge:
@@ -539,6 +561,8 @@ def profile(username: str, bg: BackgroundTasks, before: float | None = None, kin
     tells the client to poll (busy=true) instead of blocking the request."""
     u = _clean(username)
     a = db.one("SELECT * FROM accounts WHERE username=?", (u,))
+    if a and before is None:  # opening the profile clears its "new posts" count on Following
+        db.execute("UPDATE accounts SET viewed_at=? WHERE username=?", (time.time(), u))
     if before is None and _stale(a) and not fetcher.is_busy(u):
         bg.add_task(_bg_refresh, u)
         busy = True

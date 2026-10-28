@@ -11,6 +11,25 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const num = (n) => n == null ? "–" : n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + "M" : n >= 1e4 ? (n / 1e3).toFixed(n >= 1e5 ? 0 : 1) + "K" : n.toLocaleString();
 const AVATAR_FALLBACK = "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40"><rect width="40" height="40" fill="#3b3546"/><circle cx="20" cy="16" r="7" fill="#5a5266"/><path d="M6 38c2-8 8-12 14-12s12 4 14 12" fill="#5a5266"/></svg>');
 
+// Caption text with @mentions linked to the profile in Peek and #hashtags to a search of
+// saved posts. Works on the raw text and escapes the rest, so entities like &#39; never
+// look like hashtags. Usernames: letters, digits, _ and ., not ending in a dot.
+const CAPTION_LINKS = /(?<![\w.@])@([A-Za-z0-9_](?:[A-Za-z0-9_.]{0,28}[A-Za-z0-9_])?)|(?<![\w&#])#(?=[\p{N}_]*\p{L})([\p{L}\p{N}_]+)/gu;
+function linkify(text) {
+  let out = "", last = 0;
+  for (const m of String(text ?? "").matchAll(CAPTION_LINKS)) {
+    out += esc(text.slice(last, m.index));
+    out += m[1] != null
+      ? `<a class="tag" href="#/u/${esc(m[1].toLowerCase())}">@${esc(m[1])}</a>`
+      : `<a class="tag" href="#/search/${encodeURIComponent("#" + m[2])}">#${esc(m[2])}</a>`;
+    last = m.index + m[0].length;
+  }
+  return out + esc(String(text ?? "").slice(last));
+}
+
+// "5m ago", "3h ago", "just now" (never "just now ago")
+const agoText = (ts) => { const a = ago(ts); return /^\d+[mhd]$/.test(a) ? `${a} ago` : a === "just now" ? a : `on ${a}`; };
+
 function ago(ts) {
   const s = Date.now() / 1000 - ts;
   if (s < 60) return "just now";
@@ -276,7 +295,7 @@ function cardHTML(p) {
     ${frameHTML(p)}
     <div class="card-foot">
       ${actionsHTML(p)}
-      ${p.caption ? `<p class="caption clamp"><b>${esc(p.username)}</b>${esc(p.caption)}</p>` : ""}
+      ${p.caption ? `<p class="caption clamp"><b>${esc(p.username)}</b>${linkify(p.caption)}</p>` : ""}
     </div>
   </article>`;
 }
@@ -555,7 +574,7 @@ async function reelsView(seq = renderSeq) {
       <div class="reel-meta">
         <a href="#/u/${esc(p.username)}"><img class="avatar" src="${esc(p.avatar || AVATAR_FALLBACK)}" alt="">${esc(p.username)}</a>
         <span style="opacity:.7;font-size:13px;margin-left:6px">${ago(p.taken_at)}</span>
-        ${p.caption ? `<p>${esc(p.caption)}</p>` : ""}
+        ${p.caption ? `<p>${linkify(p.caption)}</p>` : ""}
       </div>
     </section>`;
   };
@@ -617,7 +636,7 @@ async function savedView(seq = renderSeq) {
   });
 }
 
-function searchView() {
+function searchView(initial = "") {
   view.innerHTML = `<div class="page-pad">
     <h1 class="page-title">Look up</h1>
     <form class="lookup" id="lookup">
@@ -648,7 +667,7 @@ function searchView() {
   const suggest = (q) => {
     clearTimeout(igTimer);
     const mine = ++igSeq;
-    if (q.replace(/^@/, "").length < 3) { ig.innerHTML = ""; return; }
+    if (q.replace(/^@/, "").length < 3 || q.startsWith("#")) { ig.innerHTML = ""; return; }  // #tags: saved posts only
     igTimer = setTimeout(async () => {
       ig.innerHTML = `<h2 class="sub">On Instagram</h2><div class="loading small"></div>`;
       const r = await api(`/api/search/instagram?q=${encodeURIComponent(q)}`).catch((e) => ({ status: "error", message: e.message, users: [] }));
@@ -686,7 +705,10 @@ function searchView() {
       }
     }, 250);
   });
-  showRecent();
+  if (initial) {  // e.g. a #hashtag tapped in a caption
+    input.value = initial;
+    input.dispatchEvent(new Event("input"));
+  } else showRecent();
 }
 
 function localStorageGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
@@ -708,7 +730,7 @@ function sessionBanner(s) {
 }
 
 function sessionCardHTML(s) {
-  const when = s.checked_at ? `checked ${ago(s.checked_at)}${ago(s.checked_at).endsWith("now") ? "" : " ago"}` : "not checked yet";
+  const when = s.checked_at ? `checked ${agoText(s.checked_at)}` : "not checked yet";
   const line = s.state === "ok" ? `<span class="pill ok">Working</span> Logged in${s.username ? ` as <b>@${esc(s.username)}</b>` : ""}, ${when}.`
     : s.state === "unchecked" ? `<span class="pill">Not checked</span> Session ${esc(s.hint)} from ${s.source === "env" ? "the server config" : "here"}, ${when}.`
     : s.state === "dead" ? `<span class="pill bad">Expired</span> ${esc(s.error || "Instagram no longer accepts this session.")}`
@@ -765,6 +787,19 @@ function wireSessionCard(box, s) {
   });
 }
 
+// Following list order, remembered per device.
+const SORTS = { latest: "Latest post", unread: "New posts", name: "Name", problems: "Problems first" };
+function sortAccounts(list) {
+  const by = SORTS[localStorageGet("peek.sort")] ? localStorageGet("peek.sort") : "latest";
+  const name = (a, b) => a.username.localeCompare(b.username);
+  const latest = (a, b) => (b.latest_post || 0) - (a.latest_post || 0) || name(a, b);
+  list.sort(by === "name" ? name
+    : by === "unread" ? (a, b) => (b.unread || 0) - (a.unread || 0) || latest(a, b)
+    : by === "problems" ? (a, b) => (!!b.last_error - !!a.last_error) || name(a, b)
+    : latest);
+  return by;
+}
+
 /* Bulk actions on Following: Select shows checkboxes and an action bar. The selection
    survives the re-render after a group change, so several groups can be applied in a row. */
 const followSel = { on: false, picked: new Set() };
@@ -774,8 +809,12 @@ function wireBulk(accounts, groups) {
   const names = new Set(accounts.map((a) => a.username));
   for (const u of followSel.picked) if (!names.has(u)) followSel.picked.delete(u);
   head.hidden = false;
+  const sort = SORTS[localStorageGet("peek.sort")] ? localStorageGet("peek.sort") : "latest";
   head.innerHTML = `<span>${accounts.length} account${accounts.length === 1 ? "" : "s"}</span>
+    <label class="sort">Sort <select id="sort" aria-label="Sort accounts">${Object.entries(SORTS).map(([k, label]) =>
+      `<option value="${k}" ${k === sort ? "selected" : ""}>${label}</option>`).join("")}</select></label>
     <button class="btn small" id="sel-toggle" aria-pressed="${followSel.on}">${followSel.on ? "Done" : "Select"}</button>`;
+  $("#sort").addEventListener("change", (e) => { localStorageSet("peek.sort", e.target.value); render(); });
   $("#sel-toggle").addEventListener("click", () => {
     followSel.on = !followSel.on;
     if (!followSel.on) followSel.picked.clear();
@@ -798,6 +837,8 @@ function wireBulk(accounts, groups) {
       <button class="btn small" id="b-all">${n === accounts.length ? "None" : "All"}</button>
       ${groups.length ? `<select id="b-add" ${n ? "" : "disabled"} aria-label="Add selected to a group"><option value="">Add to group…</option>${opts}</select>
         <select id="b-rm" ${n ? "" : "disabled"} aria-label="Remove selected from a group"><option value="">Remove from group…</option>${opts}</select>` : ""}
+      <button class="btn small" id="b-mute" ${n ? "" : "disabled"}>Mute</button>
+      <button class="btn small" id="b-unmute" ${n ? "" : "disabled"}>Unmute</button>
       <button class="btn small danger" id="b-unfollow" ${n ? "" : "disabled"}>Unfollow</button>`;
     $("#b-all", bar).addEventListener("click", () => {
       if (followSel.picked.size === accounts.length) followSel.picked.clear();
@@ -813,6 +854,16 @@ function wireBulk(accounts, groups) {
         try {
           await api("/api/accounts/bulk", { method: "POST", body: { usernames: [...followSel.picked], action, group_id: gid } });
           toast(`${action === "add_group" ? "Added" : "Removed"} ${followSel.picked.size} ${action === "add_group" ? "to" : "from"} ${gname}`);
+        } catch (err) { toast(err.message); }
+        render();
+      });
+    }
+    for (const action of ["mute", "unmute"]) {
+      $(`#b-${action}`, bar).addEventListener("click", async () => {
+        const n = followSel.picked.size;
+        try {
+          await api("/api/accounts/bulk", { method: "POST", body: { usernames: [...followSel.picked], action } });
+          toast(action === "mute" ? `Muted ${n}: they're out of Feed, Reels and stories but still refreshed` : `Unmuted ${n}`);
         } catch (err) { toast(err.message); }
         render();
       });
@@ -907,13 +958,16 @@ async function followingView(seq = renderSeq) {
   }));
   const ul = $("#people");
   ul.classList.toggle("selecting", followSel.on);
-  ul.innerHTML = accounts.length ? accounts.map((a) => `<li data-user="${esc(a.username)}">
+  sortAccounts(accounts);
+  ul.innerHTML = accounts.length ? accounts.map((a) => `<li data-user="${esc(a.username)}" class="${a.muted ? "is-muted" : ""}">
       <input type="checkbox" class="pick" aria-label="Select @${esc(a.username)}" ${followSel.picked.has(a.username) ? "checked" : ""}>
       <a href="#/u/${esc(a.username)}"><img class="avatar" src="${esc(a.avatar || AVATAR_FALLBACK)}" alt=""></a>
       <div class="who">
-        <a href="#/u/${esc(a.username)}">${esc(a.username)}</a>${a.busy ? '<span class="dot-busy" title="Refreshing"></span>' : ""}
+        <a href="#/u/${esc(a.username)}">${esc(a.username)}</a>${a.busy ? '<span class="dot-busy" title="Refreshing"></span>' : ""}${
+          a.unread ? `<span class="unread" title="Posts since you last opened this profile">${a.unread > 99 ? "99+" : a.unread} new</span>` : ""}${
+          a.muted ? `<span class="tag-muted" title="Hidden from Feed, Reels and stories">Muted</span>` : ""}
         ${a.last_error ? `<small class="err">${esc(a.last_error)}</small>`
-          : `<small>${a.fetched_at ? `Checked ${ago(a.fetched_at)} ago` : "Waiting for first fetch"}${a.latest_post ? `, latest post ${ago(a.latest_post)}` : ""}</small>`}
+          : `<small>${a.fetched_at ? `Checked ${agoText(a.fetched_at)}` : "Waiting for first fetch"}${a.latest_post ? `, latest post ${ago(a.latest_post)}` : ""}</small>`}
         ${groups.length ? `<div class="member" data-user="${esc(a.username)}">${groups.map((g) =>
           `<button aria-pressed="${a.groups.includes(g.id)}" data-g="${g.id}">${esc(g.name)}</button>`).join("")}</div>` : ""}
       </div>
@@ -939,7 +993,7 @@ async function followingView(seq = renderSeq) {
 
   const nxt = s.next_cycle ? new Date(s.next_cycle * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "soon";
   const cycle = s.cycle_running ? "A refresh is running now."
-    : s.last_cycle ? `Last full refresh ${ago(s.last_cycle)} ago, next around ${nxt}.` : `First full refresh starts ${nxt}.`;
+    : s.last_cycle ? `Last full refresh ${agoText(s.last_cycle)}, next around ${nxt}.` : `First full refresh starts ${nxt}.`;
   $("#status").innerHTML = `<b>${s.posts.toLocaleString()}</b> posts saved from <b>${s.following}</b> accounts. ${cycle}<br>
     ${s.logged_in ? "Stories are on, using your burner session." : "Running logged out, so stories are off. Add a burner session above to turn them on."}
     ${s.paused_until ? `<br><b>Instagram is rate-limiting.</b> Fetching is paused until ${new Date(s.paused_until * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}; saved posts still work.` : ""}`;
@@ -1007,6 +1061,7 @@ async function profileView(username) {
       ${a.bio ? `<p class="bio">${esc(a.bio)}</p>` : ""}
       <div class="profile-actions">
         <button class="btn ${a.followed ? "" : "primary"}" id="follow">${a.followed ? `${I.check}Following` : `${I.plus}Follow`}</button>
+        ${a.followed ? `<button class="btn" id="mute" aria-pressed="${a.muted}" title="${a.muted ? "Show this account in Feed, Reels and stories again" : "Keep refreshing, but leave out of Feed, Reels and stories"}">${a.muted ? `${I.muted}Muted` : "Mute"}</button>` : ""}
         <button class="btn" id="refresh" ${a.busy ? "disabled" : ""}>${I.refresh}${a.busy ? "Fetching" : "Refresh"}</button>
         <a class="btn" href="https://www.instagram.com/${esc(a.username)}/" target="_blank" rel="noopener noreferrer">${I.out}Instagram</a>
         ${a.cached ? `<a class="btn" href="/api/zip?user=${encodeURIComponent(a.username)}" download title="Every post Peek has saved for this account, plus stories, as one zip">${I.down}Zip</a>` : ""}
@@ -1019,6 +1074,13 @@ async function profileView(username) {
       else await api("/api/accounts", { method: "POST", body: { username: a.username } });
       toast(a.followed ? `Unfollowed @${a.username}` : `Following @${a.username}`);
       a.followed = !a.followed; paintHead();
+    });
+    $("#mute")?.addEventListener("click", async () => {
+      try {
+        await api(`/api/accounts/${encodeURIComponent(a.username)}/mute`, { method: "PUT", body: { muted: !a.muted } });
+        a.muted = !a.muted; paintHead();
+        toast(a.muted ? `Muted @${a.username}: out of Feed, Reels and stories, still refreshed` : `Unmuted @${a.username}`);
+      } catch (err) { toast(err.message); }
     });
     $("#refresh").addEventListener("click", async () => {
       await api(`/api/u/${encodeURIComponent(a.username)}/refresh`, { method: "POST" });
@@ -1165,7 +1227,7 @@ async function openPost(key) {
             <div class="who"><a href="#/u/${esc(p.username)}">${esc(p.username)}</a><time>${new Date(p.taken_at * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</time></div>
           </div>
           ${actionsHTML(p)}
-          ${p.caption ? `<p class="caption">${esc(p.caption)}</p>` : ""}
+          ${p.caption ? `<p class="caption">${linkify(p.caption)}</p>` : ""}
         </aside>
       </div>`;
     $(".ov-close", overlay).addEventListener("click", closeOverlay);
@@ -1570,7 +1632,7 @@ async function render() {
   try {
     if (route === "u" && arg) await profileView(decodeURIComponent(arg));
     else if (route === "reels") await reelsView(seq);
-    else if (route === "search") searchView();
+    else if (route === "search") searchView(arg ? decodeURIComponent(arg) : "");
     else if (route === "saved") await savedView(seq);
     else if (route === "following") await followingView(seq);
     else await feedView(seq);
@@ -1702,13 +1764,35 @@ document.addEventListener("keydown", (e) => {
    It keeps spinning while that runs. Re-tapping the current tab, or pulling down at the
    top of the feed on a phone, redraws from what's saved (no Instagram requests). */
 
+// Rate-limit pause, shown on every page: Instagram said "slow down" and Peek is waiting.
+let pauseTimer = 0;
+const hhmm = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+function paintPause(until) {
+  const chip = $("#pause-chip");
+  clearTimeout(pauseTimer);
+  const left = until ? until - Date.now() / 1000 : 0;
+  chip.hidden = left <= 0;
+  if (left <= 0) return;
+  chip.innerHTML = `<i></i>Paused until ${hhmm(until)}`;
+  chip.title = "Instagram is rate-limiting, so Peek has paused fetching. Everything already saved still works.";
+  pauseTimer = setTimeout(() => paintPause(null), left * 1000 + 1000);
+}
+$("#pause-chip").addEventListener("click", () =>
+  toast("Instagram asked Peek to slow down, so fetching is paused. Saved posts, stories and downloads still work."));
+const pollStatus = async () => {
+  const r = await fetch("/api/status").catch(() => null);
+  if (r?.ok) { const st = await r.json(); paintPause(st.paused_until); return st; }
+  return null;
+};
+setInterval(pollStatus, 60000);
+
 let refreshWatch = 0;
 function watchRefresh() {
   const btn = $("#refresh-all");
   btn.classList.add("spinning");
   clearTimeout(refreshWatch);
   const check = async () => {
-    const st = await api("/api/status").catch(() => null);
+    const st = await pollStatus();
     if (st?.cycle_running) refreshWatch = setTimeout(check, 5000);
     else btn.classList.remove("spinning");
   };
@@ -1765,7 +1849,7 @@ $$(".tabs a").forEach((a) => a.addEventListener("click", (e) => {
 })();
 
 // If a refresh is already running when the app opens, show it.
-fetch("/api/status").then((r) => r.ok && r.json()).then((st) => st?.cycle_running && watchRefresh()).catch(() => {});
+pollStatus().then((st) => st?.cycle_running && watchRefresh());
 
 applyDisplay();
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});

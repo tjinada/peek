@@ -22,9 +22,12 @@
 <body>
   <header class="top">
     <a href="#/" class="wordmark" aria-label="Peek home">peek</a>
-    <button class="icon-btn" id="refresh-all" title="Refresh everything now" aria-label="Refresh everything now">
-      <svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5"/></svg>
-    </button>
+    <div class="top-right">
+      <button class="pause-chip" id="pause-chip" hidden></button>
+      <button class="icon-btn" id="refresh-all" title="Refresh everything now" aria-label="Refresh everything now">
+        <svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5"/></svg>
+      </button>
+    </div>
   </header>
 
   <main id="view" tabindex="-1"></main>

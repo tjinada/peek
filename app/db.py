@@ -22,7 +22,9 @@ CREATE TABLE IF NOT EXISTS accounts (
     history_done INTEGER DEFAULT 0, -- reached the account's oldest post
     tried_at     REAL,             -- last fetch attempt, successful or not
     reels_cursor TEXT,             -- same as cursor, for the account's Reels tab
-    reels_done   INTEGER DEFAULT 0
+    reels_done   INTEGER DEFAULT 0,
+    muted        INTEGER DEFAULT 0, -- still refreshed, but kept out of Feed, Reels and stories
+    viewed_at    REAL              -- last time its profile was opened: posts after this are "new"
 );
 CREATE TABLE IF NOT EXISTS posts (
     shortcode  TEXT PRIMARY KEY,
@@ -120,9 +122,12 @@ def init():
                                  ("posts", "thumb_url", "TEXT"), ("posts", "detailed", "INTEGER DEFAULT 1"),
                                  ("accounts", "tried_at", "REAL"), ("accounts", "highlights_at", "REAL"),
                                  ("posts", "reels_only", "INTEGER DEFAULT 0"),
-                                 ("accounts", "reels_cursor", "TEXT"), ("accounts", "reels_done", "INTEGER DEFAULT 0")):
+                                 ("accounts", "reels_cursor", "TEXT"), ("accounts", "reels_done", "INTEGER DEFAULT 0"),
+                                 ("accounts", "muted", "INTEGER DEFAULT 0"), ("accounts", "viewed_at", "REAL")):
             if col not in {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+                if col == "viewed_at":  # start unread counts from now, not from every post ever saved
+                    c.execute("UPDATE accounts SET viewed_at = strftime('%s','now')")
 
 
 @contextmanager
