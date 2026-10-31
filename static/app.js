@@ -1115,6 +1115,8 @@ async function followingView(seq = renderSeq) {
 
   const nxt = s.next_cycle ? new Date(s.next_cycle * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "soon";
   const cycle = s.cycle_running ? "A refresh is running now."
+    : s.scheduler === "stopped" ? `<b>Automatic refresh has stopped.</b> Restart Peek to bring it back; ↻ still works.`
+    : s.scheduler === "overdue" ? `Automatic refresh is overdue (was due ${nxt})${s.last_cycle ? `; last one ${agoText(s.last_cycle)}` : ""}.`
     : s.last_cycle ? `Last full refresh ${agoText(s.last_cycle)}, next around ${nxt}.` : `First full refresh starts ${nxt}.`;
   const paused = (ts, what) => `<br><b>${what} is rate-limiting.</b> Paused until ${hhmm(ts)}; saved posts still work.`;
   $("#status").innerHTML = `<b>${s.posts.toLocaleString()}</b> posts saved from <b>${s.following}</b> accounts. ${cycle}<br>

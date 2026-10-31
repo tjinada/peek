@@ -27,6 +27,7 @@ log = logging.getLogger("peek")
 STATIC = Path(__file__).resolve().parent.parent / "static"
 
 state = {"last_cycle": None, "next_cycle": None, "cycle_running": False}
+_scheduler_task: asyncio.Task | None = None  # not in state: state is spread into /api/status JSON
 
 
 # ---------------------------------------------------------------- background refresh
@@ -66,7 +67,12 @@ async def refresh_cycle(group: int | None = None):
                     log.info("stories tray: %s new", n)
                 except fetcher.FetchError as e:
                     log.info("stories tray skipped: %s", e)
-            await asyncio.to_thread(fetcher.prune_expired_stories)
+                except Exception as e:  # e.g. a ConnectionException from the burner: posts are saved already
+                    log.warning("stories tray failed: %s", e)
+            try:
+                await asyncio.to_thread(fetcher.prune_expired_stories)
+            except Exception:
+                log.exception("pruning expired stories failed")
             state["last_cycle"] = time.time()
             db.set_meta("last_cycle", state["last_cycle"])
     finally:
@@ -87,10 +93,29 @@ async def scheduler():
     log.info("next background refresh at %s", time.strftime("%H:%M", time.localtime(state["next_cycle"])))
     await asyncio.sleep(first_wait)
     while True:
-        await refresh_cycle()
+        # Nothing a cycle raises may end this loop: before, one unexpected exception (the
+        # stories tray's ConnectionException) killed the task, and syncs silently stopped
+        # until a restart while the UI kept showing a "next" time in the past.
+        try:
+            await refresh_cycle()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("background refresh cycle failed; the next one is still scheduled")
         wait = _next_wait()
         state["next_cycle"] = time.time() + wait
         await asyncio.sleep(wait)
+
+
+def _scheduler_health() -> str:
+    """ok | overdue | stopped, for the Following page. 'overdue' = the next cycle should have
+    started a while ago and none is running (e.g. the box was asleep)."""
+    if _scheduler_task is None or _scheduler_task.done():
+        return "stopped"
+    nxt = state.get("next_cycle")
+    if nxt and not state["cycle_running"] and time.time() > nxt + 15 * 60:
+        return "overdue"
+    return "ok"
 
 
 SESSION_CHECK_HOURS = 6
@@ -118,7 +143,9 @@ async def lifespan(app: FastAPI):
     db.init()
     fetcher.init_session()
     threading.Thread(target=fetcher.hydrator_loop, name="peek-hydrator", daemon=True).start()
-    tasks = [asyncio.create_task(scheduler()), asyncio.create_task(session_watch())]
+    global _scheduler_task
+    _scheduler_task = asyncio.create_task(scheduler())
+    tasks = [_scheduler_task, asyncio.create_task(session_watch())]
     yield
     for t in tasks:
         t.cancel()
@@ -293,6 +320,7 @@ def status():
         "anon_paused_until": fetcher._anon_blocked(),
         "password": bool(PEEK_PASSWORD),
         "refresh_hours": REFRESH_HOURS,
+        "scheduler": _scheduler_health(),
         **state,
         **counts,
     }
