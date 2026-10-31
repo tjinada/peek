@@ -441,9 +441,10 @@ async function feedView(seq = renderSeq) {
       <div class="strip" id="strip"></div>
       <button class="strip-nav prev" aria-label="Scroll stories left" hidden>${I.chevL}</button>
       <button class="strip-nav next" aria-label="Scroll stories right" hidden>${I.chevR}</button>
-    </div>${html}<div id="cards"><div class="loading"></div></div><div id="more"></div>`;
+    </div>${html}<p class="fetched" id="fetched"></p><div id="cards"><div class="loading"></div></div><div id="more"></div>`;
   wireGroupBar(view);
   loadStrip(gid);
+  paintFetched();
   const cards = $("#cards");
   const first = await api(`/api/feed?_=1${gq}`);
   if (moved(seq)) return;
@@ -831,9 +832,22 @@ function statsTable(rows) {
     `<tr><th scope="row">${esc(label)}</th><td class="${cls || ""}">${esc(value)}</td></tr>`).join("")}</table>`;
 }
 
+// Feed header line: when Peek last fetched anything, and when the next automatic run is.
+async function paintFetched(st = null) {
+  const el = $("#fetched");
+  if (!el) return;
+  st ??= await pollStatus();
+  if (!st || !el.isConnected) return;
+  const next = st.next_cycle ? `next around ${hhmm(st.next_cycle)}` : "";
+  el.innerHTML = st.cycle_running ? `<span class="live"></span>Refreshing now…`
+    : st.last_fetch ? `Updated ${agoText(st.last_fetch)}${next ? ` · ${next}` : ""}`
+    : `Nothing fetched yet${next ? ` · first refresh ${next.replace("next ", "")}` : ""}`;
+  el.title = st.last_fetch ? `Last fetched ${new Date(st.last_fetch * 1000).toLocaleString()}` : "";
+}
+
 async function burnerView(seq = renderSeq) {
   view.innerHTML = `<div class="loading"></div>`;
-  const d = await api("/api/burner");
+  const [d, st] = await Promise.all([api("/api/burner"), api("/api/status")]);
   if (moved(seq)) return;
   const s = d.session;
   const total = s.budget_total || 0;
@@ -850,6 +864,8 @@ async function burnerView(seq = renderSeq) {
     <p class="hint">Where the burner session is going, and how the account itself looks. Counters cover this run only and reset when Peek restarts.</p>
     ${sessionBanner(s)}
     <section class="session-box" id="b-session"></section>
+
+    <section class="panel" id="b-refresh">${refreshPanelHTML(st)}</section>
 
     <section class="panel">
       <h2 class="sub">Hourly budget</h2>
@@ -906,6 +922,32 @@ async function burnerView(seq = renderSeq) {
     try { await api("/api/burner?force=1"); await burnerView(); }
     catch (err) { toast(err.message); btn.disabled = false; btn.lastChild.textContent = "Re-read the account"; }
   });
+  wireRefreshPanel($("#b-refresh"));
+}
+
+// How often everyone followed is refreshed. Shorter means fresher posts but more requests to
+// Instagram (and more chances of a 429); the burner is only spent on what needs it.
+const REFRESH_CHOICES = [1, 2, 3, 4, 6, 8, 12, 24];
+function refreshPanelHTML(st) {
+  const h = st.refresh_hours;
+  const when = st.cycle_running ? "A refresh is running now."
+    : `${st.last_cycle ? `Last full refresh ${agoText(st.last_cycle)}. ` : ""}Next around ${st.next_cycle ? hhmm(st.next_cycle) : "soon"}.`;
+  return `<h2 class="sub">Automatic refresh</h2>
+    <div class="seg small refresh-seg" role="radiogroup" aria-label="Refresh every">${REFRESH_CHOICES.map((v) =>
+      `<button role="radio" aria-checked="${v === h}" data-h="${v}">${v}h</button>`).join("")}</div>
+    <p class="hint">Every account you follow is checked every ${h} hour${h === 1 ? "" : "s"} (±20%, so it isn't on a fixed beat). ${when}</p>
+    ${h < 3 ? `<p class="warn">Short intervals mean many more requests. With lots of follows, expect more rate-limit pauses.</p>` : ""}`;
+}
+function wireRefreshPanel(box) {
+  $$(".refresh-seg button", box).forEach((b) => b.addEventListener("click", async () => {
+    try {
+      await api("/api/settings/refresh", { method: "PUT", body: { hours: +b.dataset.h } });
+      const st = await api("/api/status");
+      box.innerHTML = refreshPanelHTML(st);
+      wireRefreshPanel(box);
+      toast(`Refreshing every ${b.dataset.h}h. Next around ${hhmm(st.next_cycle)}.`);
+    } catch (err) { toast(err.message); }
+  }));
 }
 
 // Following list order, remembered per device.
@@ -1911,7 +1953,7 @@ $("#pause-chip").addEventListener("click", () =>
   toast("Instagram asked Peek to slow down, so fetching is paused. Saved posts, stories and downloads still work."));
 const pollStatus = async () => {
   const r = await fetch("/api/status").catch(() => null);
-  if (r?.ok) { const st = await r.json(); paintPause(st.anon_paused_until); return st; }
+  if (r?.ok) { const st = await r.json(); paintPause(st.anon_paused_until); paintFetched(st); return st; }
   return null;
 };
 setInterval(pollStatus, 60000);

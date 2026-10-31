@@ -79,20 +79,45 @@ async def refresh_cycle(group: int | None = None):
         state["cycle_running"] = False
 
 
-def _next_wait() -> float:
-    # ±20% jitter so requests don't land on a fixed rhythm
-    return REFRESH_HOURS * 3600 * random.uniform(0.8, 1.2)
+# The interval is a setting (Burner tab), seeded by PEEK_REFRESH_HOURS. The schedule is
+# anchored on the last full refresh, manual ones included: next = last + interval x jitter.
+# So changing the interval, or pressing ↻, moves the next run without a restart.
+REFRESH_CHOICES = (1, 2, 3, 4, 6, 8, 12, 24)
+_reschedule = asyncio.Event()
+_jitter = random.uniform(0.8, 1.2)  # ±20% so requests don't land on a fixed rhythm
+_retry_at = 0.0  # after a cycle that didn't complete, wait before trying again
+_booted = time.time()
+
+
+def refresh_hours() -> float:
+    try:
+        h = float(db.get_setting("refresh_hours", REFRESH_HOURS))
+    except (TypeError, ValueError):
+        h = REFRESH_HOURS
+    return h if h > 0 else REFRESH_HOURS
+
+
+def _planned_next() -> float:
+    last = state["last_cycle"]
+    due = last + refresh_hours() * 3600 * _jitter if last else _booted + 10
+    return max(due, _retry_at, _booted + 10)  # never straight away on startup
 
 
 async def scheduler():
+    global _jitter, _retry_at
     # A restart (e.g. a rebuild) shouldn't trigger a full refresh: carry on from the last one.
-    last = db.get_meta("last_cycle")
-    state["last_cycle"] = last
-    first_wait = max(10.0, last + _next_wait() - time.time()) if last else 10.0
-    state["next_cycle"] = time.time() + first_wait
-    log.info("next background refresh at %s", time.strftime("%H:%M", time.localtime(state["next_cycle"])))
-    await asyncio.sleep(first_wait)
+    state["last_cycle"] = db.get_meta("last_cycle")
     while True:
+        state["next_cycle"] = _planned_next()
+        log.info("next background refresh at %s", time.strftime("%H:%M", time.localtime(state["next_cycle"])))
+        try:  # sleep until it's due, or until the interval changes
+            await asyncio.wait_for(_reschedule.wait(), timeout=max(0.0, state["next_cycle"] - time.time()))
+        except asyncio.TimeoutError:
+            pass
+        if _reschedule.is_set():
+            _reschedule.clear()
+            continue
+        before = state["last_cycle"]
         # Nothing a cycle raises may end this loop: before, one unexpected exception (the
         # stories tray's ConnectionException) killed the task, and syncs silently stopped
         # until a restart while the UI kept showing a "next" time in the past.
@@ -102,9 +127,10 @@ async def scheduler():
             raise
         except Exception:
             log.exception("background refresh cycle failed; the next one is still scheduled")
-        wait = _next_wait()
-        state["next_cycle"] = time.time() + wait
-        await asyncio.sleep(wait)
+        if state["last_cycle"] == before:  # didn't complete (failed, or another run was busy)
+            _retry_at = time.time() + 15 * 60
+        else:
+            _jitter = random.uniform(0.8, 1.2)
 
 
 def _scheduler_health() -> str:
@@ -319,7 +345,8 @@ def status():
         "paused_until": fetcher.cooldown_until(),
         "anon_paused_until": fetcher._anon_blocked(),
         "password": bool(PEEK_PASSWORD),
-        "refresh_hours": REFRESH_HOURS,
+        "refresh_hours": refresh_hours(),
+        "last_fetch": db.one("SELECT MAX(fetched_at) AS t FROM accounts WHERE followed=1")["t"],
         "scheduler": _scheduler_health(),
         **state,
         **counts,
@@ -382,6 +409,22 @@ async def burner(force: bool = False):
     kind, the account's own counts, and the feature switches. Live, except the account's
     own counts (cached six hours); ?force=1 re-reads those, which costs one request."""
     return await asyncio.to_thread(fetcher.burner_stats, force)
+
+
+class RefreshIn(BaseModel):
+    hours: float
+
+
+@app.put("/api/settings/refresh")
+async def set_refresh(body: RefreshIn):  # async: _reschedule must be set on the event loop
+    """How often everyone followed is refreshed. Takes effect at once: the scheduler wakes
+    and re-plans from the last full refresh."""
+    if body.hours not in REFRESH_CHOICES:
+        raise HTTPException(400, f"Pick one of {', '.join(str(h) for h in REFRESH_CHOICES)} hours")
+    db.set_setting("refresh_hours", body.hours)
+    _reschedule.set()
+    log.info("refresh interval set to %sh", body.hours)
+    return {"refresh_hours": body.hours, "next_cycle": _planned_next(), "choices": REFRESH_CHOICES}
 
 
 @app.get("/api/feed")

@@ -513,3 +513,10 @@ a.tag:hover { text-decoration: underline; }
 @media (prefers-reduced-motion: reduce) { .meter i { transition: none; } }
 
 .warn { margin: 10px 0 0; font-size: 0.8438rem; color: var(--safelight); max-width: 60ch; }
+/* ---------------------------------------------------------------- feed "updated" line + refresh setting */
+.fetched { margin: 2px 16px 10px; font-size: 0.75rem; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.fetched:empty { display: none; }
+.fetched .live { width: 7px; height: 7px; border-radius: 50%; background: var(--safelight); animation: blink 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .fetched .live { animation: none; } }
+.refresh-seg { flex-wrap: wrap; margin-top: 6px; }
+.refresh-seg button { padding: 5px 10px; font-variant-numeric: tabular-nums; }
