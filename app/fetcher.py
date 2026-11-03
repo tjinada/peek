@@ -1195,11 +1195,14 @@ def _refresh_body(username: str, with_stories: bool) -> dict:
             _save_cursor(username, it, reached_end)
 
     reels = 0
-    if REELS_TAB and _session_ready() and (not p.is_private or p.followed_by_viewer):
+    if REELS_TAB and _reels_due(username) and _session_ready() and (not p.is_private or p.followed_by_viewer):
         try:
             _spend("reels")
             with _using(_session_loader()):
                 reels = _reels_newest(username, p.userid)
+            # a quiet run backs the account off to weekly; finding anything resets it to daily
+            db.execute("UPDATE accounts SET reels_checked_at=?, reels_quiet=? WHERE username=?",
+                       (time.time(), 0 if reels else _reels_quiet(username) + 1, username))
         except Exception as e:  # posts are what matter; the reels tab is a bonus
             log.warning("%s: reels tab failed: %s", username, e)
 
@@ -1386,6 +1389,28 @@ def _store_reel(username: str, node: dict) -> str | None:
     if not complete:
         _hydrate_wake.set()  # the background worker fetches the rest
     return sc
+
+
+# The Reels-tab check costs one burner request per account, and on every refresh it was
+# most of the burner's traffic (266 of 375 requests in one 38h run). Reels that skip the
+# posts grid are rare, so check each account at most daily, and weekly once a few daily
+# checks in a row found nothing. "Load older reels" on a profile is unaffected.
+REELS_DAILY = 24 * 3600
+REELS_WEEKLY = 7 * 24 * 3600
+REELS_QUIET_RUNS = 3  # daily checks in a row with nothing new before dropping to weekly
+
+
+def _reels_quiet(username: str) -> int:
+    r = db.one("SELECT reels_quiet FROM accounts WHERE username=?", (username,))
+    return (r and r["reels_quiet"]) or 0
+
+
+def _reels_due(username: str) -> bool:
+    r = db.one("SELECT reels_checked_at, reels_quiet FROM accounts WHERE username=?", (username,))
+    if not r or not r["reels_checked_at"]:
+        return True
+    gap = REELS_WEEKLY if (r["reels_quiet"] or 0) >= REELS_QUIET_RUNS else REELS_DAILY
+    return time.time() - r["reels_checked_at"] >= gap
 
 
 def _reels_newest(username: str, userid: int) -> int:
@@ -1810,6 +1835,8 @@ def burner_stats(force: bool = False) -> dict:
 
     totals = db.one("SELECT COUNT(*) AS n, SUM(restricted) AS r, SUM(is_private) AS p, "
                     "SUM(followed) AS f FROM accounts") or {}
+    weekly = db.one("SELECT COUNT(*) AS n FROM accounts WHERE followed=1 AND reels_quiet >= ?",
+                    (REELS_QUIET_RUNS,))["n"]
     return {
         "session": session_info(),
         "uptime": time.time() - _started,
@@ -1826,6 +1853,8 @@ def burner_stats(force: bool = False) -> dict:
             "followed": totals.get("f") or 0,
             "restricted": totals.get("r") or 0,
             "private": totals.get("p") or 0,
+            "reels_weekly": weekly,
+            "reels_daily": max(0, (totals.get("f") or 0) - weekly),
         },
     }
 

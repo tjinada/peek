@@ -25,7 +25,9 @@ CREATE TABLE IF NOT EXISTS accounts (
     reels_done   INTEGER DEFAULT 0,
     muted        INTEGER DEFAULT 0, -- still refreshed, but kept out of Feed, Reels and stories
     viewed_at    REAL,             -- last time its profile was opened: posts after this are "new"
-    restricted   INTEGER DEFAULT 0  -- only visible with a login (age/region gated)
+    restricted   INTEGER DEFAULT 0, -- only visible with a login (age/region gated)
+    reels_checked_at REAL,         -- last Reels-tab check during a refresh
+    reels_quiet      INTEGER DEFAULT 0 -- checks in a row that found no new reels-only posts
 );
 CREATE TABLE IF NOT EXISTS posts (
     shortcode  TEXT PRIMARY KEY,
@@ -127,6 +129,7 @@ MIGRATIONS = (
     ("accounts", "reels_cursor", "TEXT"), ("accounts", "reels_done", "INTEGER DEFAULT 0"),
     ("accounts", "muted", "INTEGER DEFAULT 0"), ("accounts", "viewed_at", "REAL"),
     ("accounts", "restricted", "INTEGER DEFAULT 0"),
+    ("accounts", "reels_checked_at", "REAL"), ("accounts", "reels_quiet", "INTEGER DEFAULT 0"),
     ("session", "ig_followers", "INTEGER"), ("session", "ig_following", "INTEGER"),
     ("session", "ig_posts", "INTEGER"), ("session", "ig_fetched_at", "REAL"),
 )

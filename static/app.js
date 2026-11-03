@@ -902,7 +902,7 @@ async function burnerView(seq = renderSeq) {
     <section class="panel">
       <h2 class="sub">What's switched on</h2>
       ${statsTable([
-        ["Reels tab", sw.reels_tab ? "on" : "off"],
+        ["Reels tab", sw.reels_tab ? `on: ${num(acc.reels_daily ?? 0)} daily, ${num(acc.reels_weekly ?? 0)} weekly` : "off"],
         ["Instagram search", sw.search ? "on" : "off"],
         ["Batched stories", sw.stories_batched ? "on" : "off"],
         ["Accounts followed", num(acc.followed ?? 0)],
