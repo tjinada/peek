@@ -521,7 +521,8 @@ def accounts():
     rows = db.rows(
         """SELECT a.*, (SELECT MAX(taken_at) FROM posts p WHERE p.username=a.username) AS latest_post,
                   (SELECT COUNT(*) FROM posts p WHERE p.username=a.username AND p.taken_at > COALESCE(a.viewed_at, 0)
-                     AND a.viewed_at IS NOT NULL) AS unread
+                     AND a.viewed_at IS NOT NULL) AS unread,
+                  a.rowid AS added_order
            FROM accounts a WHERE followed=1 ORDER BY username"""
     )
     member: dict[str, list[int]] = {}
@@ -593,9 +594,11 @@ class Follow(BaseModel):
 def follow(body: Follow, bg: BackgroundTasks):
     u = _clean(body.username)
     db.execute(
-        "INSERT INTO accounts (username, followed, viewed_at) VALUES (?,1,?) "
-        "ON CONFLICT(username) DO UPDATE SET followed=1, viewed_at=COALESCE(accounts.viewed_at, excluded.viewed_at)",
-        (u, time.time())
+        "INSERT INTO accounts (username, followed, viewed_at, followed_at) VALUES (?,1,?,?) "
+        "ON CONFLICT(username) DO UPDATE SET followed=1, viewed_at=COALESCE(accounts.viewed_at, excluded.viewed_at), "
+        # re-following starts a new follow date; following again while followed keeps it
+        "followed_at=CASE WHEN accounts.followed=1 THEN accounts.followed_at ELSE excluded.followed_at END",
+        (u, time.time(), time.time())
     )
     a = db.one("SELECT * FROM accounts WHERE username=?", (u,))
     if _stale(a) and not fetcher.is_busy(u):

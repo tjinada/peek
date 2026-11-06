@@ -951,7 +951,12 @@ function wireRefreshPanel(box) {
 }
 
 // Following list order, remembered per device.
-const SORTS = { latest: "Latest post", unread: "New posts", name: "Name", problems: "Problems first" };
+const SORTS = { latest: "Latest post", unread: "New posts", followed_new: "Recently followed",
+  followed_old: "Oldest followed", name: "Name", problems: "Problems first" };
+// Follows from before follow dates were kept have no date; they sort by when Peek first saw
+// the account (its row order), which is the order they were added in, after the dated ones.
+const followKey = (a) => [a.followed_at || 0, a.added_order || 0];
+const byFollowed = (a, b) => { const [fa, oa] = followKey(a), [fb, ob] = followKey(b); return fb - fa || ob - oa; };
 function sortAccounts(list) {
   const by = SORTS[localStorageGet("peek.sort")] ? localStorageGet("peek.sort") : "latest";
   const name = (a, b) => a.username.localeCompare(b.username);
@@ -959,8 +964,18 @@ function sortAccounts(list) {
   list.sort(by === "name" ? name
     : by === "unread" ? (a, b) => (b.unread || 0) - (a.unread || 0) || latest(a, b)
     : by === "problems" ? (a, b) => (!!b.last_error - !!a.last_error) || name(a, b)
+    : by === "followed_new" ? byFollowed
+    : by === "followed_old" ? (a, b) => byFollowed(b, a)
     : latest);
   return by;
+}
+
+const FOLLOWED_WITHIN = { "": "Any time", 1: "Today", 7: "Last 7 days", 30: "Last 30 days" };
+function filterFollowed(list) {
+  const days = +localStorageGet("peek.followedWithin") || 0;
+  if (!days) return list;
+  const since = Date.now() / 1000 - days * 86400;
+  return list.filter((a) => a.followed_at && a.followed_at >= since);
 }
 
 /* Bulk actions on Following: Select shows checkboxes and an action bar. The selection
@@ -976,8 +991,14 @@ function wireBulk(accounts, groups) {
   head.innerHTML = `<span>${accounts.length} account${accounts.length === 1 ? "" : "s"}</span>
     <label class="sort">Sort <select id="sort" aria-label="Sort accounts">${Object.entries(SORTS).map(([k, label]) =>
       `<option value="${k}" ${k === sort ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+    <label class="sort">Followed <select id="followed-within" aria-label="Show accounts followed">${Object.entries(FOLLOWED_WITHIN).map(([k, label]) =>
+      `<option value="${k}" ${k === (localStorageGet("peek.followedWithin") || "") ? "selected" : ""}>${label}</option>`).join("")}</select></label>
     <button class="btn small" id="sel-toggle" aria-pressed="${followSel.on}">${followSel.on ? "Done" : "Select"}</button>`;
   $("#sort").addEventListener("change", (e) => { localStorageSet("peek.sort", e.target.value); render(); });
+  $("#followed-within").addEventListener("change", (e) => {
+    e.target.value ? localStorageSet("peek.followedWithin", e.target.value) : localStorageRemove("peek.followedWithin");
+    render();
+  });
   $("#sel-toggle").addEventListener("click", () => {
     followSel.on = !followSel.on;
     if (!followSel.on) followSel.picked.clear();
@@ -1122,7 +1143,8 @@ async function followingView(seq = renderSeq) {
   const ul = $("#people");
   ul.classList.toggle("selecting", followSel.on);
   sortAccounts(accounts);
-  ul.innerHTML = accounts.length ? accounts.map((a) => `<li data-user="${esc(a.username)}" class="${a.muted ? "is-muted" : ""}">
+  const shown = filterFollowed(accounts);
+  ul.innerHTML = shown.length ? shown.map((a) => `<li data-user="${esc(a.username)}" class="${a.muted ? "is-muted" : ""}">
       <input type="checkbox" class="pick" aria-label="Select @${esc(a.username)}" ${followSel.picked.has(a.username) ? "checked" : ""}>
       <a href="#/u/${esc(a.username)}"><img class="avatar" src="${esc(a.avatar || AVATAR_FALLBACK)}" alt=""></a>
       <div class="who">
@@ -1131,14 +1153,17 @@ async function followingView(seq = renderSeq) {
           a.muted ? `<span class="tag-muted" title="Hidden from Feed, Reels and stories">Muted</span>` : ""}${
           a.restricted ? `<span class="tag-restricted" title="Age or region restricted: only fetched with the burner session">Restricted</span>` : ""}
         ${a.last_error ? `<small class="err">${esc(a.last_error)}</small>`
-          : `<small>${a.fetched_at ? `Checked ${agoText(a.fetched_at)}` : "Waiting for first fetch"}${a.latest_post ? `, latest post ${ago(a.latest_post)}` : ""}</small>`}
+          : `<small>${a.fetched_at ? `Checked ${agoText(a.fetched_at)}` : "Waiting for first fetch"}${a.latest_post ? `, latest post ${ago(a.latest_post)}` : ""}${
+            a.followed_at ? `, followed ${agoText(a.followed_at)}` : ""}</small>`}
         ${groups.length ? `<div class="member" data-user="${esc(a.username)}">${groups.map((g) =>
           `<button aria-pressed="${a.groups.includes(g.id)}" data-g="${g.id}">${esc(g.name)}</button>`).join("")}</div>` : ""}
       </div>
       <button class="btn" data-unfollow="${esc(a.username)}">Unfollow</button>
-    </li>`).join("") : `<li>${empty("Not following anyone", "Add a public account above. Peek checks everyone you follow every few hours in the background.")}</li>`;
+    </li>`).join("") : accounts.length
+      ? `<li>${empty("Nobody followed in that period", "Pick another option under Followed. Follows from before Peek kept follow dates only show under Any time.")}</li>`
+      : `<li>${empty("Not following anyone", "Add a public account above. Peek checks everyone you follow every few hours in the background.")}</li>`;
 
-  if (accounts.length) wireBulk(accounts, groups);
+  if (accounts.length) wireBulk(shown, groups);  // keep the sort/filter bar even when the filter shows nobody
 
   $$(".member", ul).forEach((box) => $$("button", box).forEach((b) => b.addEventListener("click", async () => {
     b.setAttribute("aria-pressed", b.getAttribute("aria-pressed") !== "true");

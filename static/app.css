@@ -520,3 +520,4 @@ a.tag:hover { text-decoration: underline; }
 @media (prefers-reduced-motion: reduce) { .fetched .live { animation: none; } }
 .refresh-seg { flex-wrap: wrap; margin-top: 6px; }
 .refresh-seg button { padding: 5px 10px; font-variant-numeric: tabular-nums; }
+.list-head { flex-wrap: wrap; row-gap: 8px; }

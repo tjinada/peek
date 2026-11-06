@@ -4,7 +4,7 @@
 // Bump SHELL whenever app.js, app.css or index.html change. The version is what publishes
 // a release: install refetches the shell, activate drops the old cache, and a stale pair
 // can't survive a deploy.
-const SHELL = "peek-shell-v10";
+const SHELL = "peek-shell-v11";
 const MEDIA = "peek-media-v1";
 const SHELL_FILES = ["/", "/index.html", "/app.css", "/app.js", "/manifest.webmanifest", "/icons/icon-192.png"];
 
