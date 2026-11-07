@@ -1,4 +1,5 @@
 import AVFoundation
+import AVKit
 import Photos
 import SwiftUI
 import UIKit
@@ -60,6 +61,22 @@ struct PlayerLayerView: UIViewRepresentable {
     func updateUIView(_ v: PlayerUIView, context: Context) {
         if v.playerLayer.player !== player { v.playerLayer.player = player }
         v.playerLayer.videoGravity = gravity
+    }
+}
+
+/// The system player screen: scrubbing, speed menu, AirPlay. For full-screen videos.
+struct PlayerController: UIViewControllerRepresentable {
+    let player: AVPlayer
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let vc = AVPlayerViewController()
+        vc.player = player
+        vc.allowsPictureInPicturePlayback = false  // needs a background-audio capability the app doesn't have
+        return vc
+    }
+
+    func updateUIViewController(_ vc: AVPlayerViewController, context: Context) {
+        if vc.player !== player { vc.player = player }
     }
 }
 

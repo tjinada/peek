@@ -12,6 +12,12 @@ final class AppModel {
     var needsLogin = false
     var toast: String?
     var groups: [PeekGroup] = []
+    /// Posts newer than the top of the feed: the Feed tab badge and the in-feed pill.
+    var newPosts = 0
+    /// A server refresh is running (polls faster while it is).
+    var refreshing = false
+    /// The newest post the feed has shown; set by FeedView.
+    var feedNewest: Double?
     /// Bumped after (re)connecting, so every tab rebuilds and reloads.
     private(set) var epoch = 0
 
@@ -28,6 +34,16 @@ final class AppModel {
 
     func loadGroups() async {
         if let g = try? await API.shared.groups() { groups = g }
+    }
+
+    /// Cheap server-side count, no Instagram traffic. MainTabs calls it on a timer.
+    func pollFeed() async {
+        guard let since = feedNewest else { return }
+        let g = UserDefaults.standard.integer(forKey: "feedGroup")
+        guard let r: FeedNew = try? await API.shared.get(
+            "/api/feed/new", ["since": String(since), "group": g == 0 ? nil : String(g)]) else { return }
+        newPosts = r.count
+        refreshing = r.refreshing
     }
 
     func show(_ message: String) {

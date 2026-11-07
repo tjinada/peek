@@ -13,6 +13,7 @@ struct ReelsView: View {
     @State private var loadingMore = false
     @State private var error: String?
     @AppStorage("muted") private var muted = true
+    @AppStorage("reelSpeed") private var speed = 1.0
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -50,6 +51,7 @@ struct ReelsView: View {
         .onDisappear { onScreen = false; sync() }
         .onChange(of: current) { sync() }
         .onChange(of: muted) { sync() }
+        .onChange(of: speed) { sync() }
         .onChange(of: scenePhase) { sync() }
     }
 
@@ -105,6 +107,7 @@ struct ReelsView: View {
         }
         for (id, lp) in players {
             lp.player.isMuted = muted
+            lp.player.defaultRate = Float(speed)  // play() starts at this rate
             if id == cur && visible { lp.player.play() } else { lp.player.pause() }
         }
     }
@@ -118,6 +121,10 @@ private struct ReelPage: View {
 
     @State private var paused = false
     @State private var saved: Bool?
+    @State private var captionOpen = false
+    @AppStorage("reelSpeed") private var speed = 1.0
+
+    private static let speeds: [Double] = [0.5, 1, 1.25, 1.5, 2]
 
     private var isSaved: Bool { saved ?? post.saved }
 
@@ -149,7 +156,10 @@ private struct ReelPage: View {
                     }
                     .buttonStyle(.plain)
                     if let caption = post.caption, !caption.isEmpty {
-                        Text(caption).font(.subheadline).lineLimit(2)
+                        Text(caption)
+                            .font(.subheadline)
+                            .lineLimit(captionOpen ? 10 : 2)
+                            .onTapGesture { withAnimation(.snappy) { captionOpen.toggle() } }
                     }
                 }
                 Spacer(minLength: 0)
@@ -168,6 +178,14 @@ private struct ReelPage: View {
                             Button { MediaActions.share(v, name: "\(post.username)_\(post.shortcode)") } label: {
                                 Label("Share…", systemImage: "square.and.arrow.up")
                             }
+                            Picker(selection: $speed) {
+                                ForEach(Self.speeds, id: \.self) { s in
+                                    Text(s == 1 ? "Normal" : "\(s.formatted())×").tag(s)
+                                }
+                            } label: {
+                                Label("Speed", systemImage: "gauge.with.dots.needle.67percent")
+                            }
+                            .pickerStyle(.menu)
                             if let url = post.instagramURL {
                                 Link(destination: url) { Label("Open in Instagram", systemImage: "arrow.up.right.square") }
                             }
@@ -183,7 +201,10 @@ private struct ReelPage: View {
             .foregroundStyle(.white)
             .shadow(radius: 3)
             .padding(.horizontal, 16)
-            .padding(.bottom, 20)
+            .padding(.bottom, 30)
+            if let player, active {
+                ReelScrubber(player: player).padding(.horizontal, 10)
+            }
         }
         .contentShape(Rectangle())
         .onTapGesture {
@@ -201,5 +222,58 @@ private struct ReelPage: View {
         attempt {
             do { try await API.shared.setSaved(post.shortcode, next) } catch { saved = !next; throw error }
         }
+    }
+}
+
+/// Thin progress bar along the bottom of a reel; drag on it to scrub. Pauses while dragging.
+private struct ReelScrubber: View {
+    let player: AVPlayer
+    @State private var scrub: Double?  // 0…1 while dragging
+    @State private var resume = false
+
+    var body: some View {
+        GeometryReader { g in
+            TimelineView(.periodic(from: .now, by: 0.1)) { _ in
+                let f = scrub ?? fraction
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.white.opacity(0.3))
+                    Capsule().fill(.white).frame(width: max(0, g.size.width * f))
+                }
+                .frame(height: scrub == nil ? 3 : 6)
+                .frame(maxHeight: .infinity, alignment: .bottom)
+            }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { v in
+                        if scrub == nil {
+                            resume = player.rate > 0
+                            player.pause()
+                        }
+                        scrub = min(max(v.location.x / max(g.size.width, 1), 0), 1)
+                        seek(precise: false)
+                    }
+                    .onEnded { _ in
+                        seek(precise: true)
+                        scrub = nil
+                        if resume { player.play() }
+                    }
+            )
+        }
+        .frame(height: 28)
+        .animation(.snappy(duration: 0.15), value: scrub == nil)
+    }
+
+    private var fraction: Double {
+        guard let item = player.currentItem else { return 0 }
+        let d = item.duration.seconds
+        return d.isFinite && d > 0 ? min(item.currentTime().seconds / d, 1) : 0
+    }
+
+    private func seek(precise: Bool) {
+        guard let scrub, let d = player.currentItem?.duration.seconds, d.isFinite, d > 0 else { return }
+        let tolerance = precise ? CMTime.zero : CMTime(seconds: 0.3, preferredTimescale: 600)
+        player.seek(to: CMTime(seconds: scrub * d, preferredTimescale: 600),
+                    toleranceBefore: tolerance, toleranceAfter: tolerance)
     }
 }

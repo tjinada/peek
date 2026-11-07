@@ -8,13 +8,12 @@ struct FeedView: View {
     @State private var stories: [StoryGroup] = []
     @State private var storyStart: StoryStart?
     @State private var status: Status?
-    @State private var newCount = 0
-    @State private var refreshing = false
     @State private var refreshStarts = 0  // haptic when you start one, not when a scheduled one runs
     @State private var loaded = false
     @State private var loadingMore = false
     @State private var error: String?
 
+    private var app: AppModel { AppModel.shared }
     private var groupParam: String? { group == 0 ? nil : String(group) }
     private var groupName: String {
         AppModel.shared.groups.first { $0.id == group }?.name ?? "Everyone"
@@ -55,14 +54,14 @@ struct FeedView: View {
             }
             .refreshable { await reload() }
             .overlay(alignment: .top) {
-                if newCount > 0 {
+                if app.newPosts > 0 {
                     Button {
                         Task {
                             await reload()
                             withAnimation { proxy.scrollTo("top", anchor: .top) }
                         }
                     } label: {
-                        Label("\(newCount) new post\(newCount == 1 ? "" : "s")", systemImage: "arrow.up")
+                        Label("\(app.newPosts) new post\(app.newPosts == 1 ? "" : "s")", systemImage: "arrow.up")
                             .font(.subheadline.weight(.semibold))
                             .padding(.horizontal, 14)
                             .padding(.vertical, 8)
@@ -74,7 +73,7 @@ struct FeedView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
                 }
             }
-            .animation(.snappy, value: newCount)
+            .animation(.snappy, value: app.newPosts)
         }
         .navigationTitle("Peek")
         .navigationBarTitleDisplayMode(.inline)
@@ -93,15 +92,17 @@ struct FeedView: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button { refreshAll() } label: {
-                    if refreshing { ProgressView() } else { Image(systemName: "arrow.clockwise") }
+                    if app.refreshing { ProgressView() } else { Image(systemName: "arrow.clockwise") }
                 }
-                .disabled(refreshing)
+                .disabled(app.refreshing)
             }
         }
         .sensoryFeedback(.success, trigger: refreshStarts)
         .task { if !loaded { await reload() } }
         .onChange(of: group) { Task { await reload() } }
-        .task(id: group) { await poll() }
+        .onChange(of: app.refreshing) { _, running in
+            if !running { Task { if let s: Status = try? await API.shared.get("/api/status") { status = s } } }
+        }
         .fullScreenCover(item: $storyStart) { s in
             StoryViewer(groups: stories, start: s.index) { ids in
                 Task {
@@ -119,7 +120,7 @@ struct FeedView: View {
                     Label("Burner session expired — stories are off. Fix it in the web UI.", systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
                 }
-                if refreshing {
+                if app.refreshing {
                     Text("Refreshing…")
                 } else if let t = status.lastFetch {
                     Text("Updated \(Fmt.ago(t)) ago")
@@ -139,7 +140,8 @@ struct FeedView: View {
             posts = r.posts
             next = r.next
             seenAt = r.seenAt
-            newCount = 0
+            app.newPosts = 0
+            app.feedNewest = r.posts.first?.takenAt
             error = nil
             if let newest = r.posts.first?.takenAt {
                 Task {
@@ -154,7 +156,7 @@ struct FeedView: View {
         await loadStories()
         if let s: Status = try? await API.shared.get("/api/status") {
             status = s
-            refreshing = s.cycleRunning
+            app.refreshing = s.cycleRunning
         }
     }
 
@@ -178,20 +180,6 @@ struct FeedView: View {
         }
     }
 
-    /// Cheap local check for posts newer than the top one; quicker while a refresh runs.
-    private func poll() async {
-        while !Task.isCancelled {
-            try? await Task.sleep(for: .seconds(refreshing ? 8 : 30))
-            guard !Task.isCancelled, let newest = posts.first?.takenAt else { continue }
-            guard let r: FeedNew = try? await API.shared.get("/api/feed/new", ["since": String(newest), "group": groupParam])
-            else { continue }
-            let finished = refreshing && !r.refreshing
-            refreshing = r.refreshing
-            newCount = r.count
-            if finished, let s: Status = try? await API.shared.get("/api/status") { status = s }
-        }
-    }
-
     private func refreshAll() {
         attempt {
             let r: RefreshAllResponse = try await API.shared.send("POST", "/api/refresh-all", query: ["group": groupParam])
@@ -199,7 +187,7 @@ struct FeedView: View {
                 AppModel.shared.show("Nobody to refresh")
                 return
             }
-            refreshing = true
+            app.refreshing = true
             refreshStarts += 1
             AppModel.shared.show(r.already == true ? "A refresh is already running" : "Refreshing \(r.count ?? 0) accounts…")
         }

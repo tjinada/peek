@@ -60,10 +60,13 @@ struct RootView: View {
 }
 
 struct MainTabs: View {
+    private var app: AppModel { AppModel.shared }
+
     var body: some View {
         TabView {
             TabStack { FeedView() }
                 .tabItem { Label("Feed", systemImage: "house") }
+                .badge(app.newPosts)
             TabStack { ReelsView() }
                 .tabItem { Label("Reels", systemImage: "play.rectangle") }
             TabStack { SearchView() }
@@ -74,6 +77,12 @@ struct MainTabs: View {
                 .tabItem { Label("Following", systemImage: "person.2") }
         }
         .task { await AppModel.shared.loadGroups() }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(app.refreshing ? 8 : 30))
+                await app.pollFeed()
+            }
+        }
     }
 }
 

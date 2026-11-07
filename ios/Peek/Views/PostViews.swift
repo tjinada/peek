@@ -318,7 +318,7 @@ private struct ZoomPage: View {
     var body: some View {
         Group {
             if item.video {
-                if let player { VideoPlayer(player: player) } else { ProgressView().tint(.white) }
+                if let player { PlayerController(player: player) } else { ProgressView().tint(.white) }
             } else if let image {
                 ZoomableImage(image: image, onPull: onPull, onClose: onClose)
             } else {
