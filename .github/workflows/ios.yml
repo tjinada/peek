@@ -1,0 +1,30 @@
+name: iOS build
+
+on:
+  push:
+    paths: ["ios/**", ".github/workflows/ios.yml"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build for the simulator (no signing)
+        run: |
+          xcodebuild -version
+          if ! xcodebuild -project ios/Peek.xcodeproj -target Peek -sdk iphonesimulator \
+               -configuration Debug CODE_SIGNING_ALLOWED=NO build > build.log 2>&1; then
+            echo "::group::Errors"; grep -E "error:" build.log | sort -u | head -150; echo "::endgroup::"
+            tail -40 build.log
+            exit 1
+          fi
+          echo "Warnings in Peek sources:"
+          grep -E "/ios/Peek/.*warning:" build.log | sort -u | head -80 || true
+          tail -3 build.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-log
+          path: build.log
