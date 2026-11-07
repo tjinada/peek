@@ -17,6 +17,7 @@ struct PeekApp: App {
 
 struct RootView: View {
     private var app: AppModel { AppModel.shared }
+    @AppStorage("appearance") private var appearance = "system"   // system | light | dark
 
     var body: some View {
         Group {
@@ -44,6 +45,17 @@ struct RootView: View {
             }
         }
         .animation(.snappy, value: app.toast)
+        .onAppear { applyAppearance() }
+        .onChange(of: appearance) { applyAppearance() }
+    }
+
+    /// Set on the window rather than with preferredColorScheme, so sheets and full-screen
+    /// covers follow it and going back to System takes effect straight away.
+    private func applyAppearance() {
+        let style: UIUserInterfaceStyle = appearance == "light" ? .light : appearance == "dark" ? .dark : .unspecified
+        for scene in UIApplication.shared.connectedScenes {
+            (scene as? UIWindowScene)?.windows.forEach { $0.overrideUserInterfaceStyle = style }
+        }
     }
 }
 

@@ -5,6 +5,7 @@ struct SettingsView: View {
     @State private var hours = 4.0
     @State private var cleared = false
     @AppStorage("muted") private var muted = true
+    @AppStorage("appearance") private var appearance = "system"
 
     private static let choices: [Double] = [1, 2, 3, 4, 6, 8, 12, 24]
 
@@ -73,6 +74,11 @@ struct SettingsView: View {
             }
 
             Section("This phone") {
+                Picker("Appearance", selection: $appearance) {
+                    Text("System").tag("system")
+                    Text("Light").tag("light")
+                    Text("Dark").tag("dark")
+                }
                 Toggle("Start videos muted", isOn: $muted)
                 Button(cleared ? "Image cache cleared" : "Clear image cache") {
                     ImageCache.shared.clear()
