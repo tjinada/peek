@@ -66,7 +66,6 @@ struct RemoteImage: View {
     let path: String?
     var maxPixel: CGFloat = 1400
     var contentMode: ContentMode = .fill
-    var onLoad: ((CGSize) -> Void)? = nil
 
     @State private var image: UIImage?
     @State private var failed = false
@@ -95,15 +94,12 @@ struct RemoteImage: View {
         guard let path else { return }
         if let hit = ImageLoader.cached(path, maxPixel) {
             image = hit
-            onLoad?(hit.size)
             return
         }
         image = nil
         failed = false
         do {
-            let img = try await ImageLoader.load(path, maxPixel: maxPixel)
-            image = img
-            onLoad?(img.size)
+            image = try await ImageLoader.load(path, maxPixel: maxPixel)
         } catch {
             if !Task.isCancelled { failed = true }
         }

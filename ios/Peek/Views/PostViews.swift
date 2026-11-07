@@ -112,7 +112,9 @@ struct PostCard: View {
     }
 }
 
-/// Swipeable media. Takes the first item's shape (clamped to Instagram's 4:5…1.91:1).
+/// Swipeable media in the first item's shape (clamped to Instagram's 4:5…1.91:1).
+/// The shape is measured before the pager is built: resizing a page-style TabView after it
+/// exists, or swapping its items in place, can leave the first page blank.
 struct MediaCarousel: View {
     let media: [MediaItem]
     let fallback: String?
@@ -121,18 +123,25 @@ struct MediaCarousel: View {
     @State private var aspect: CGFloat?
     @State private var zoom: ZoomStart?
 
+    private var firstPath: String? {
+        guard let first = media.first else { return fallback }
+        return first.video ? first.poster : first.src
+    }
+
     var body: some View {
         Group {
-            if media.isEmpty {
-                RemoteImage(path: fallback, maxPixel: 1400, onLoad: setAspect)
+            if aspect == nil {
+                Color(.secondarySystemBackground).overlay { ProgressView() }
+            } else if media.isEmpty {
+                RemoteImage(path: fallback, maxPixel: 1400)
             } else {
                 TabView(selection: $page) {
                     ForEach(Array(media.enumerated()), id: \.offset) { i, item in
                         Group {
                             if item.video {
-                                InlineVideo(item: item, onLoad: i == 0 ? setAspect : nil)
+                                InlineVideo(item: item)
                             } else {
-                                RemoteImage(path: item.src, maxPixel: 1400, onLoad: i == 0 ? setAspect : nil)
+                                RemoteImage(path: item.src, maxPixel: 1400)
                                     .contentShape(Rectangle())
                                     .onTapGesture { zoom = ZoomStart(index: i) }
                             }
@@ -142,18 +151,35 @@ struct MediaCarousel: View {
                 }
                 .tabViewStyle(.page(indexDisplayMode: media.count > 1 ? .always : .never))
                 .indexViewStyle(.page(backgroundDisplayMode: .interactive))
+                .id(media.map(\.src))  // new items (a stub filled in) get a fresh pager
             }
         }
         .aspectRatio(aspect ?? 0.8, contentMode: .fit)
         .background(Color(.secondarySystemBackground))
+        .task(id: firstPath) { await measure() }
         .fullScreenCover(item: $zoom) { z in
             ZoomViewer(media: media, start: z.index)
         }
     }
 
-    private func setAspect(_ size: CGSize) {
-        guard aspect == nil, size.height > 0 else { return }
-        aspect = min(max(size.width / size.height, 0.8), 1.91)
+    /// Loads the first image (it's needed anyway, and lands in the cache) to get the shape.
+    private func measure() async {
+        guard let path = firstPath else {
+            aspect = 0.8
+            return
+        }
+        if let hit = ImageLoader.cached(path, 1400) {  // scrolling back: no placeholder flash
+            aspect = Self.clamp(hit.size)
+            return
+        }
+        aspect = nil
+        let size = (try? await ImageLoader.load(path, maxPixel: 1400))?.size
+        if Task.isCancelled { return }
+        aspect = size.map(Self.clamp) ?? 0.8  // on failure the page shows its own error
+    }
+
+    private static func clamp(_ size: CGSize) -> CGFloat {
+        size.height > 0 ? min(max(size.width / size.height, 0.8), 1.91) : 0.8
     }
 }
 
@@ -165,7 +191,6 @@ struct ZoomStart: Identifiable {
 /// Poster with a play button; tap to play in place with the system controls.
 struct InlineVideo: View {
     let item: MediaItem
-    var onLoad: ((CGSize) -> Void)? = nil
     @State private var player: AVPlayer?
 
     var body: some View {
@@ -173,7 +198,7 @@ struct InlineVideo: View {
             if let player {
                 VideoPlayer(player: player)
             } else {
-                RemoteImage(path: item.poster, maxPixel: 1400, onLoad: onLoad)
+                RemoteImage(path: item.poster, maxPixel: 1400)
                 Image(systemName: "play.circle.fill")
                     .font(.system(size: 58))
                     .foregroundStyle(.white.opacity(0.92))
