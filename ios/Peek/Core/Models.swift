@@ -58,6 +58,7 @@ struct Account: Decodable, Hashable, Identifiable {
     let unread: Int?
     let latestPost: Double?
     let followedAt: Double?
+    let addedOrder: Int?        // row order: when Peek first saw the account
     var id: String { username }
 }
 

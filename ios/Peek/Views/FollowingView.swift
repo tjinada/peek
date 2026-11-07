@@ -17,7 +17,10 @@ struct FollowingView: View {
         }
         switch sort {
         case "posted": list.sort { ($0.latestPost ?? 0) > ($1.latestPost ?? 0) }
-        case "followed": list.sort { ($0.followedAt ?? 0) > ($1.followedAt ?? 0) }
+        case "followed":
+            // Like the web app: newest follow date first; follows from before dates were kept
+            // have none and go after, in the order they were added.
+            list.sort { ($0.followedAt ?? 0, $0.addedOrder ?? 0) > ($1.followedAt ?? 0, $1.addedOrder ?? 0) }
         default: break  // the server sorts by name
         }
         return list
