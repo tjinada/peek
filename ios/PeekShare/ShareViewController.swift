@@ -59,13 +59,17 @@ final class ShareViewController: UIViewController {
         return detector?.firstMatch(in: text, range: NSRange(text.startIndex..., in: text))?.url
     }
 
-    /// Extensions can't use UIApplication.shared, but the app object is on the responder chain.
-    /// (Allowed because the target sets APPLICATION_EXTENSION_API_ONLY = NO: fine for a personal app.)
+    /// Extensions can't call UIApplication.open, but the app object is on the responder chain,
+    /// so call its openURL:options:completionHandler: through the runtime. Not App Store safe;
+    /// fine for a personal app.
     private func openApp(_ url: URL) -> Bool {
+        typealias OpenURL = @convention(c) (NSObject, Selector, NSURL, NSDictionary, (@convention(block) (Bool) -> Void)?) -> Void
+        let selector = NSSelectorFromString("openURL:options:completionHandler:")
         var responder: UIResponder? = self
         while let r = responder {
-            if let app = r as? UIApplication {
-                app.open(url)
+            if let app = r as? UIApplication, app.responds(to: selector) {
+                let open = unsafeBitCast(app.method(for: selector), to: OpenURL.self)
+                open(app, selector, url as NSURL, NSDictionary(), nil)
                 return true
             }
             responder = r.next
