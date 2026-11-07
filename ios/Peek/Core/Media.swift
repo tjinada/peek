@@ -19,7 +19,14 @@ enum Video {
     }
 }
 
-/// A video that repeats, for reels.
+enum Screen {
+    @MainActor static var bounds: CGRect {
+        (UIApplication.shared.connectedScenes.first { $0 is UIWindowScene } as? UIWindowScene)?.screen.bounds
+            ?? CGRect(x: 0, y: 0, width: 430, height: 932)
+    }
+}
+
+/// A video that repeats, for reels and the feed.
 final class LoopPlayer {
     let player = AVQueuePlayer()
     private var looper: AVPlayerLooper?
@@ -44,7 +51,7 @@ struct PlayerLayerView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> PlayerUIView {
         let v = PlayerUIView()
-        v.backgroundColor = .black
+        v.backgroundColor = .clear  // a poster underneath shows until the first frame
         v.playerLayer.player = player
         v.playerLayer.videoGravity = gravity
         return v

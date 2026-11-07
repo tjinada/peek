@@ -40,7 +40,7 @@ struct ProfileView: View {
                 if let error {
                     Text(error).font(.footnote).foregroundStyle(.red).padding(.horizontal, 14)
                 }
-                PostGrid(posts: posts, title: username) { Task { await loadMore() } }
+                PostGrid(posts: posts, title: username, showsProfile: false) { Task { await loadMore() } }
                 footer
             }
             .padding(.top, 8)

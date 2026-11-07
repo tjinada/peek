@@ -192,6 +192,7 @@ private struct ReelPage: View {
             if paused { player.pause() } else { player.play() }
         }
         .onChange(of: active) { paused = false }
+        .sensoryFeedback(.impact(weight: .light), trigger: isSaved)
     }
 
     private func toggleSave() {

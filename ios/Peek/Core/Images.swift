@@ -77,6 +77,7 @@ struct RemoteImage: View {
                     Image(uiImage: image)
                         .resizable()
                         .aspectRatio(contentMode: contentMode)
+                        .transition(.opacity)
                 } else {
                     Rectangle().fill(Color(.secondarySystemBackground))
                         .overlay {
@@ -99,7 +100,8 @@ struct RemoteImage: View {
         image = nil
         failed = false
         do {
-            image = try await ImageLoader.load(path, maxPixel: maxPixel)
+            let img = try await ImageLoader.load(path, maxPixel: maxPixel)
+            withAnimation(.easeOut(duration: 0.25)) { image = img }  // cache hits above don't fade
         } catch {
             if !Task.isCancelled { failed = true }
         }

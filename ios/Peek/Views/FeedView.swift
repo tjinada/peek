@@ -10,6 +10,7 @@ struct FeedView: View {
     @State private var status: Status?
     @State private var newCount = 0
     @State private var refreshing = false
+    @State private var refreshStarts = 0  // haptic when you start one, not when a scheduled one runs
     @State private var loaded = false
     @State private var loadingMore = false
     @State private var error: String?
@@ -97,6 +98,7 @@ struct FeedView: View {
                 .disabled(refreshing)
             }
         }
+        .sensoryFeedback(.success, trigger: refreshStarts)
         .task { if !loaded { await reload() } }
         .onChange(of: group) { Task { await reload() } }
         .task(id: group) { await poll() }
@@ -198,6 +200,7 @@ struct FeedView: View {
                 return
             }
             refreshing = true
+            refreshStarts += 1
             AppModel.shared.show(r.already == true ? "A refresh is already running" : "Refreshing \(r.count ?? 0) accounts…")
         }
     }
