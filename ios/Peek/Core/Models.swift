@@ -146,6 +146,7 @@ struct RefreshAllResponse: Decodable { let count: Int?; let already: Bool? }
 /// Navigation targets shared by every tab.
 enum Route: Hashable {
     case profile(String)
+    case post(String)           // by shortcode, e.g. a shared link
     case posts(PostList)
     case search(String)
 }

@@ -62,6 +62,11 @@ struct PostCard: View {
                         Label("Share…", systemImage: "square.and.arrow.up")
                     }
                 }
+                if post.media.count > 1 {
+                    Button { MediaActions.saveAllToPhotos(post.media, name: "\(post.username)_\(post.shortcode)") } label: {
+                        Label("Save all \(post.media.count) to Photos", systemImage: "square.and.arrow.down.on.square")
+                    }
+                }
                 if post.media.count > 1, let item = current {
                     let on = post.savedSlides.contains(item.idx)
                     Button { toggleSlide(item.idx, on: !on) } label: {
@@ -477,14 +482,23 @@ struct PostGrid: View {
             Label(saved ? "Unsave" : "Save", systemImage: saved ? "bookmark.slash" : "bookmark")
         }
         Button { saveToPhotos(p) } label: { Label("Save to Photos", systemImage: "square.and.arrow.down") }
+        if p.kind == "carousel" && p.slide == nil {
+            Button { saveToPhotos(p, all: true) } label: {
+                Label("Save all to Photos", systemImage: "square.and.arrow.down.on.square")
+            }
+        }
         if showsProfile, let url = URL(string: "peek://u/\(p.username)") {
             Button { openURL(url) } label: { Label("Open \(p.username)", systemImage: "person.crop.circle") }
         }
     }
 
-    private func saveToPhotos(_ p: Post) {
+    private func saveToPhotos(_ p: Post, all: Bool = false) {
         attempt {
-            let full = p.media.isEmpty ? try await API.shared.post(p.shortcode) : p
+            let full = p.needsDetail ? try await API.shared.post(p.shortcode) : p
+            if all {
+                MediaActions.saveAllToPhotos(full.media, name: "\(p.username)_\(p.shortcode)")
+                return
+            }
             guard let item = p.slide.flatMap({ s in full.media.first { $0.idx == s } }) ?? full.media.first else {
                 AppModel.shared.show("Nothing to save yet")
                 return

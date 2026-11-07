@@ -895,7 +895,16 @@ async def post(shortcode: str):
         (shortcode,),
     )
     if not p:
-        raise HTTPException(404, "Not cached")
+        # not seen before (a shared link): fetch it from Instagram once
+        try:
+            found = await asyncio.to_thread(fetcher.fetch_post, shortcode)
+        except Exception as e:
+            raise HTTPException(502, f"Couldn't fetch that post: {e}")
+        if not found:
+            raise HTTPException(404, "That post doesn't exist or isn't public")
+        p = db.one(
+            "SELECT p.*, a.avatar, a.full_name FROM posts p LEFT JOIN accounts a ON a.username=p.username "
+            "WHERE shortcode=?", (shortcode,))
     if p.get("detailed") == 0:
         # a stub from a logged-out page: fetch its full details now (one request)
         try:

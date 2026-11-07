@@ -6,6 +6,7 @@ struct SettingsView: View {
     @State private var cleared = false
     @AppStorage("muted") private var muted = true
     @AppStorage("appearance") private var appearance = "system"
+    @AppStorage(AppLock.key) private var lockEnabled = false
 
     private static let choices: [Double] = [1, 2, 3, 4, 6, 8, 12, 24]
 
@@ -79,6 +80,13 @@ struct SettingsView: View {
                     Text("Light").tag("light")
                     Text("Dark").tag("dark")
                 }
+                Toggle("Lock with Face ID", isOn: $lockEnabled)
+                    .onChange(of: lockEnabled) { _, on in
+                        if on && !AppLock.available {
+                            lockEnabled = false
+                            AppModel.shared.show("Set a passcode on this iPhone first")
+                        }
+                    }
                 Toggle("Start videos muted", isOn: $muted)
                 Button(cleared ? "Image cache cleared" : "Clear image cache") {
                     ImageCache.shared.clear()

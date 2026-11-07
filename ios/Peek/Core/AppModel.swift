@@ -18,6 +18,8 @@ final class AppModel {
     var refreshing = false
     /// The newest post the feed has shown; set by FeedView.
     var feedNewest: Double?
+    /// A link opened from outside (share sheet); the Search tab pushes it.
+    var openRoute: Route?
     /// Bumped after (re)connecting, so every tab rebuilds and reloads.
     private(set) var epoch = 0
 

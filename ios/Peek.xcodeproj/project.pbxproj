@@ -6,15 +6,51 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		A1000000000000000000001B /* PeekShare.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* PeekShare.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A1000000000000000000001D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A1000000000000000000000A /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A10000000000000000000017;
+			remoteInfo = PeekShare;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		A1000000000000000000001C /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				A1000000000000000000001B /* PeekShare.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		A10000000000000000000001 /* Peek.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Peek.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1000000000000000000000E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A10000000000000000000011 /* PeekShare.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = PeekShare.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000012 /* PeekShare-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "PeekShare-Info.plist"; sourceTree = "<group>"; };
+		A1000000000000000000001F /* Peek.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Peek.xcconfig; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		A10000000000000000000002 /* Peek */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = Peek;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000013 /* PeekShare */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = PeekShare;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -27,14 +63,24 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A10000000000000000000014 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		A10000000000000000000004 = {
 			isa = PBXGroup;
 			children = (
+				A1000000000000000000001F /* Peek.xcconfig */,
 				A1000000000000000000000E /* Info.plist */,
+				A10000000000000000000012 /* PeekShare-Info.plist */,
 				A10000000000000000000002 /* Peek */,
+				A10000000000000000000013 /* PeekShare */,
 				A10000000000000000000005 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -43,6 +89,7 @@
 			isa = PBXGroup;
 			children = (
 				A10000000000000000000001 /* Peek.app */,
+				A10000000000000000000011 /* PeekShare.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -57,10 +104,12 @@
 				A10000000000000000000008 /* Sources */,
 				A10000000000000000000003 /* Frameworks */,
 				A10000000000000000000009 /* Resources */,
+				A1000000000000000000001C /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				A1000000000000000000001E /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				A10000000000000000000002 /* Peek */,
@@ -71,6 +120,28 @@
 			productName = Peek;
 			productReference = A10000000000000000000001 /* Peek.app */;
 			productType = "com.apple.product-type.application";
+		};
+		A10000000000000000000017 /* PeekShare */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000000000000000000018 /* Build configuration list for PBXNativeTarget "PeekShare" */;
+			buildPhases = (
+				A10000000000000000000015 /* Sources */,
+				A10000000000000000000014 /* Frameworks */,
+				A10000000000000000000016 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				A10000000000000000000013 /* PeekShare */,
+			);
+			name = PeekShare;
+			packageProductDependencies = (
+			);
+			productName = PeekShare;
+			productReference = A10000000000000000000011 /* PeekShare.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -83,6 +154,9 @@
 				LastUpgradeCheck = 1600;
 				TargetAttributes = {
 					A10000000000000000000006 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+					A10000000000000000000017 = {
 						CreatedOnToolsVersion = 16.0;
 					};
 				};
@@ -102,12 +176,20 @@
 			projectRoot = "";
 			targets = (
 				A10000000000000000000006 /* Peek */,
+				A10000000000000000000017 /* PeekShare */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		A10000000000000000000009 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000000000000000000016 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -124,11 +206,27 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A10000000000000000000015 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A1000000000000000000001E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A10000000000000000000017 /* PeekShare */;
+			targetProxy = A1000000000000000000001D /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		A1000000000000000000000C /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1000000000000000000001F /* Peek.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -163,6 +261,7 @@
 		};
 		A1000000000000000000000D /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1000000000000000000001F /* Peek.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -206,7 +305,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.tjinada.peek;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(PEEK_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
@@ -234,8 +333,62 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.tjinada.peek;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(PEEK_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		A10000000000000000000019 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = NO;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "PeekShare-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Peek;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(PEEK_BUNDLE_ID).share";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		A1000000000000000000001A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = NO;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "PeekShare-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Peek;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(PEEK_BUNDLE_ID).share";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -261,6 +414,15 @@
 			buildConfigurations = (
 				A1000000000000000000000C /* Debug */,
 				A1000000000000000000000D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10000000000000000000018 /* Build configuration list for PBXNativeTarget "PeekShare" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000000000000000000019 /* Debug */,
+				A1000000000000000000001A /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

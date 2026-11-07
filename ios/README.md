@@ -6,8 +6,15 @@ server stays the source of truth: refreshes, the burner session and storage all 
 ## Build and install
 
 1. On the Mac: `git pull`, then open `ios/Peek.xcodeproj` (Xcode 16 or newer).
-2. Select the **Peek** target → *Signing & Capabilities* → pick your Team. If the bundle id
-   `com.tjinada.peek` is taken for your team, change it to anything unique.
+2. Signing lives in `ios/Local.xcconfig`, which git ignores, so pulls never clash with it.
+   Create it once:
+   ```
+   DEVELOPMENT_TEAM = ABCDE12345
+   // PEEK_BUNDLE_ID = com.yourname.peek   (only if com.tjinada.peek is taken for your team)
+   ```
+   Your team ID is in Xcode → Settings → Accounts → your team, or developer.apple.com →
+   Membership. Don't pick the team in *Signing & Capabilities*: that writes it into the
+   project file instead. The share extension's id follows automatically (`<id>.share`).
 3. Plug in the iPhone (or pick it over Wi-Fi), choose it as the run destination, press ⌘R.
    The first time, iOS asks you to trust the developer: *Settings → General → VPN & Device
    Management*.
@@ -40,6 +47,14 @@ If the server has `PEEK_PASSWORD` set, the app asks for it once and keeps the se
 
 Profiles (`/api/u/...`) cover posts/reels grids, "load older", highlights, follow, mute and
 groups. Also: pinch/double-tap zoom, save to Photos, and the share sheet.
+
+**Share sheet:** in Instagram (or Safari, Messages…) tap Share → **Peek** to open that
+profile or post in the app. If Peek is missing from the row, scroll it to the end → More →
+add it. Posts Peek hasn't seen are fetched by the server the first time (needs the server
+from this branch).
+
+**Face ID lock:** Settings → This phone → Lock with Face ID. Also hides the app switcher
+snapshot.
 
 Burner session management (pasting cookies, policy) stays in the web app; the app links to it
 from Settings and shows when the session has expired.

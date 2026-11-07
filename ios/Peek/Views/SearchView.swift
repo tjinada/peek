@@ -9,10 +9,21 @@ struct SearchView: View {
     @State private var igUsers: [IGUser] = []
     @State private var igNote: String?
 
-    private var handle: String? { Fmt.handle(query) }
+    private var link: Route? { Links.route(text: query) }  // a pasted instagram.com link
+    private var handle: String? { link == nil ? Fmt.handle(query) : nil }
 
     var body: some View {
         List {
+            if let link {
+                Section {
+                    NavigationLink(value: link) {
+                        switch link {
+                        case .profile(let u): Label("Open @\(u)", systemImage: "person.crop.circle")
+                        default: Label("Open this post", systemImage: "photo")
+                        }
+                    }
+                }
+            }
             if let handle {
                 Section {
                     NavigationLink(value: Route.profile(handle)) {
@@ -72,7 +83,7 @@ struct SearchView: View {
 
     private func search() async {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard q.count >= 2 else {
+        guard q.count >= 2, link == nil else {
             accounts = []; posts = []; igUsers = []; igNote = nil
             return
         }

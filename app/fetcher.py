@@ -900,6 +900,26 @@ def hydrate(sc: str) -> bool:
     return True
 
 
+def fetch_post(sc: str) -> str | None:
+    """A post Peek has never seen, e.g. a link shared from Instagram: fetch and cache it
+    (one anonymous request). Returns the owner's username, or None if it doesn't exist."""
+    row = db.one("SELECT username FROM posts WHERE shortcode=?", (sc,))
+    if row:
+        return row["username"]
+    _check_anon()
+    with _lock:
+        try:
+            with _using(_anon):
+                _counters["anon"] += 1
+                post = instaloader.Post.from_shortcode(L.context, sc)
+        except (QueryReturnedNotFoundException, BadResponseException):
+            return None
+        username = post.owner_username
+        _store_post(username, post)
+    queue_downloads(username, only=sc)
+    return username
+
+
 _hydrate_wake = threading.Event()
 
 

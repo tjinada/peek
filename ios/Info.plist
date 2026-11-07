@@ -10,6 +10,19 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Peek connects to your Peek server on your home network.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>Peek links</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>peek</string>
+			</array>
+		</dict>
+	</array>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Unlock Peek with Face ID.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Save photos and videos from Peek to your library.</string>
 </dict>

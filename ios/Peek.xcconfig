@@ -1,0 +1,6 @@
+// Shared settings. Your signing goes in Local.xcconfig (git-ignored), so pulls never clash
+// with it. Local.xcconfig example:
+//   DEVELOPMENT_TEAM = ABCDE12345
+//   PEEK_BUNDLE_ID = com.yourname.peek   // only if com.tjinada.peek is taken for your team
+PEEK_BUNDLE_ID = com.tjinada.peek
+#include? "Local.xcconfig"

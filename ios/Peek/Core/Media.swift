@@ -97,25 +97,47 @@ enum MediaActions {
 
     static func saveToPhotos(_ item: MediaItem, name: String) {
         attempt {
-            let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-            guard status == .authorized || status == .limited else {
-                AppModel.shared.show("Allow Peek to add photos in Settings")
-                return
+            guard await photosAllowed() else { return }
+            let file = try await photoFile(item, name: name)
+            try await addToPhotos([(file, item.video)])
+            AppModel.shared.show(item.video ? "Video saved to Photos" : "Photo saved to Photos")
+        }
+    }
+
+    /// Every item of a carousel, in order, in one go.
+    static func saveAllToPhotos(_ items: [MediaItem], name: String) {
+        attempt {
+            guard !items.isEmpty, await photosAllowed() else { return }
+            AppModel.shared.show("Saving \(items.count)…")
+            var files: [(URL, Bool)] = []
+            for item in items { files.append((try await photoFile(item, name: "\(name)_\(item.idx)"), item.video)) }
+            try await addToPhotos(files)
+            AppModel.shared.show("Saved \(items.count) to Photos")
+        }
+    }
+
+    private static func photosAllowed() async -> Bool {
+        let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        if status == .authorized || status == .limited { return true }
+        AppModel.shared.show("Allow Peek to add photos in Settings")
+        return false
+    }
+
+    /// The downloaded file, as JPEG if it was WebP: Photos is happiest with JPEG.
+    private static func photoFile(_ item: MediaItem, name: String) async throws -> URL {
+        let url = try await download(item, name: name)
+        guard !item.video, url.pathExtension == "webp",
+              let img = UIImage(contentsOfFile: url.path), let jpg = img.jpegData(compressionQuality: 0.95) else { return url }
+        let jpgURL = url.deletingPathExtension().appendingPathExtension("jpg")
+        try jpg.write(to: jpgURL, options: .atomic)
+        return jpgURL
+    }
+
+    private static func addToPhotos(_ files: [(URL, Bool)]) async throws {
+        try await PHPhotoLibrary.shared().performChanges {
+            for (url, isVideo) in files {
+                PHAssetCreationRequest.forAsset().addResource(with: isVideo ? .video : .photo, fileURL: url, options: nil)
             }
-            var url = try await download(item, name: name)
-            // Photos is happiest with JPEG; Instagram often serves WebP.
-            if !item.video, url.pathExtension == "webp",
-               let img = UIImage(contentsOfFile: url.path), let jpg = img.jpegData(compressionQuality: 0.95) {
-                let jpgURL = url.deletingPathExtension().appendingPathExtension("jpg")
-                try jpg.write(to: jpgURL, options: .atomic)
-                url = jpgURL
-            }
-            let fileURL = url
-            let isVideo = item.video
-            try await PHPhotoLibrary.shared().performChanges {
-                PHAssetCreationRequest.forAsset().addResource(with: isVideo ? .video : .photo, fileURL: fileURL, options: nil)
-            }
-            AppModel.shared.show(isVideo ? "Video saved to Photos" : "Photo saved to Photos")
         }
     }
 

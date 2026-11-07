@@ -1,3 +1,7 @@
 data/
 .env
 __pycache__/
+
+# iOS: your signing team (see ios/Peek.xcconfig)
+ios/Local.xcconfig
+ios/**/xcuserdata/
