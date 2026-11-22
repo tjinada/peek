@@ -236,6 +236,7 @@ struct InlineVideo: View {
             RemoteImage(path: item.poster, maxPixel: 1400)  // shows until the first frame
             if let player {
                 PlayerLayerView(player: player.player, gravity: .resizeAspectFill)
+                PlayerStatus(player: player)
             }
             Button { muted.toggle() } label: {
                 Image(systemName: muted ? "speaker.slash.fill" : "speaker.wave.2.fill")

@@ -348,6 +348,7 @@ def status():
         "refresh_hours": refresh_hours(),
         "last_fetch": db.one("SELECT MAX(fetched_at) AS t FROM accounts WHERE followed=1")["t"],
         "scheduler": _scheduler_health(),
+        "videos": fetcher.video_counts(),
         **state,
         **counts,
     }
@@ -441,10 +442,13 @@ def feed(before: float | None = None, limit: int = 18, kind: str | None = None, 
         sql += " AND p.taken_at < ?"
         args.append(before)
     if kind == "reels":
-        sql += " AND p.kind IN ('reel','video')"
+        # -1 = Instagram says the post is gone: there will never be a video to play
+        sql += " AND p.kind IN ('reel','video') AND p.detailed != -1"
     sql += " ORDER BY p.taken_at DESC LIMIT ?"
     args.append(limit)
     posts = _posts_out(db.rows(sql, args))
+    if kind == "reels":
+        fetcher.prefetch_videos([p["shortcode"] for p in posts])
     out = {"posts": posts, "next": posts[-1]["taken_at"] if len(posts) == limit else None}
     if before is None:
         out["seen_at"] = db.get_meta("feed_seen_at")  # newest post shown last time

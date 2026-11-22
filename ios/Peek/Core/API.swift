@@ -94,6 +94,22 @@ final class API {
         throw APIError.http(http.statusCode, detail)
     }
 
+    /// Why the server won't serve a media file, or nil if it will. Asks for two bytes only.
+    func mediaError(_ path: String) async -> String? {
+        guard let url = url(path) else { return APIError.noServer.errorDescription }
+        var req = URLRequest(url: url)
+        req.setValue("bytes=0-1", forHTTPHeaderField: "Range")
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        do {
+            let (data, resp) = try await session.data(for: req)
+            guard let http = resp as? HTTPURLResponse, !(200..<300).contains(http.statusCode) else { return nil }
+            let detail = (try? JSONDecoder().decode(Detail.self, from: data))?.detail ?? ""
+            return detail.isEmpty ? "Server error \(http.statusCode)" : detail
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
     private func decode<T: Decodable>(_ data: Data) throws -> T {
         do {
             return try decoder.decode(T.self, from: data)

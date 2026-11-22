@@ -921,26 +921,37 @@ def fetch_post(sc: str) -> str | None:
 
 
 _hydrate_wake = threading.Event()
+_hydrate_retry: dict[str, float] = {}  # shortcode -> not before this time
+HYDRATE_RETRY = 3600
 
 
 def hydrator_loop():
-    """Background thread: fill in stubs one at a time, followed accounts and newest first."""
+    """Background thread: fill in stubs one at a time, followed accounts and newest first.
+    A stub that fails sits out for an hour: retrying the same one straight away kept every
+    stub behind it waiting for as long as it kept failing."""
     while True:
-        row = db.one(
+        rows = db.rows(
             """SELECT p.shortcode FROM posts p LEFT JOIN accounts a ON a.username = p.username
-               WHERE p.detailed = 0 ORDER BY COALESCE(a.followed, 0) DESC, p.taken_at DESC LIMIT 1""")
-        if not row:
+               WHERE p.detailed = 0 ORDER BY COALESCE(a.followed, 0) DESC, p.taken_at DESC LIMIT 200""")
+        if not rows:
             _hydrate_wake.clear()
             _hydrate_wake.wait(300)
             continue
         if _anon_blocked():
             time.sleep(max(5, _anon_blocked() - time.time()))
             continue
+        now = time.time()
+        sc = next((r["shortcode"] for r in rows if _hydrate_retry.get(r["shortcode"], 0) <= now), None)
+        if not sc:  # everything near the top failed recently
+            time.sleep(300)
+            continue
         try:
-            hydrate(row["shortcode"])
+            hydrate(sc)
+            _hydrate_retry.pop(sc, None)
             time.sleep(random.uniform(15, 30))  # background work: stay well under the limits
         except Exception as e:
-            log.warning("hydrate %s failed: %s; pausing", row["shortcode"], e)
+            _hydrate_retry[sc] = time.time() + HYDRATE_RETRY
+            log.warning("hydrate %s failed: %s; pausing", sc, e)
             time.sleep(60)
 
 
@@ -1074,6 +1085,44 @@ def _safe_ensure(sc, idx, poster):
         ensure_local(sc, idx, poster)
     except Exception as e:
         log.warning("download job %s/%s failed: %s", sc, idx, e)
+
+
+_prefetching: set[tuple[str, int]] = set()
+
+
+def prefetch_videos(shortcodes: list[str]):
+    """Queue these posts' videos that aren't on disk yet. The Reels feed calls this with the
+    page it's about to return, so /m/ finds a file instead of downloading while the player
+    waits. Videos are otherwise last in the queue behind every image of a refresh."""
+    if not shortcodes:
+        return
+    marks = ",".join("?" * len(shortcodes))
+    for r in db.rows(f"SELECT shortcode, idx, path FROM media WHERE is_video=1 AND url IS NOT NULL "
+                     f"AND shortcode IN ({marks})", list(shortcodes)):
+        key = (r["shortcode"], r["idx"])
+        if key in _prefetching or (r["path"] and (MEDIA_DIR / r["path"]).exists()):
+            continue
+        _prefetching.add(key)
+        _pool.submit(_prefetch_one, *key)
+
+
+def _prefetch_one(sc, idx):
+    try:
+        _safe_ensure(sc, idx, False)
+    finally:
+        _prefetching.discard((sc, idx))
+
+
+def video_counts() -> dict:
+    """Where the feed's videos stand, for /api/status: a reel plays only once its details
+    are fetched (not a stub) and its file is on disk or its link still works."""
+    return db.one(
+        """SELECT
+             (SELECT COUNT(*) FROM posts WHERE kind IN ('reel','video')) AS posts,
+             (SELECT COUNT(*) FROM posts WHERE kind IN ('reel','video') AND detailed = 0) AS stubs,
+             (SELECT COUNT(*) FROM posts WHERE kind IN ('reel','video') AND detailed = -1) AS unavailable,
+             (SELECT COUNT(*) FROM media WHERE is_video = 1) AS files,
+             (SELECT COUNT(*) FROM media WHERE is_video = 1 AND path IS NOT NULL) AS downloaded""")
 
 
 # ---------------------------------------------------------------- refresh

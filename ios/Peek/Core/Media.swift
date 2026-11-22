@@ -27,16 +27,113 @@ enum Screen {
     }
 }
 
-/// A video that repeats, for reels and the feed.
+/// A video that repeats, for reels and the feed. One item, rewound when it ends:
+/// AVPlayerLooper keeps several copies of the item loading at once, which is heavy over a
+/// network. `phase` says why nothing is moving, so a failure doesn't look like a frozen poster.
+@Observable
 final class LoopPlayer {
-    let player = AVQueuePlayer()
-    private var looper: AVPlayerLooper?
+    enum Phase: Equatable {
+        case ok
+        case buffering
+        case failed(String)
+    }
+
+    let player = AVPlayer()
+    private(set) var phase: Phase = .ok
+
+    private let path: String
+    @ObservationIgnored private var itemStatus: NSKeyValueObservation?
+    @ObservationIgnored private var control: NSKeyValueObservation?
+    @ObservationIgnored private var ended: NSObjectProtocol?
 
     init?(path: String, muted: Bool) {
-        guard let asset = Video.asset(path) else { return nil }
-        looper = AVPlayerLooper(player: player, templateItem: AVPlayerItem(asset: asset))
+        self.path = path
+        guard Video.asset(path) != nil else { return nil }
         player.isMuted = muted
+        player.actionAtItemEnd = .none  // stay on the item; `ended` rewinds it
         player.preventsDisplaySleepDuringVideoPlayback = true
+        control = player.observe(\.timeControlStatus) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.update() }
+        }
+        load()
+    }
+
+    deinit {
+        if let ended { NotificationCenter.default.removeObserver(ended) }
+    }
+
+    /// Starts again from the server after a failure.
+    func retry() {
+        load()
+        player.play()
+    }
+
+    private func load() {
+        guard let asset = Video.asset(path) else { return }
+        let item = AVPlayerItem(asset: asset)
+        if let ended { NotificationCenter.default.removeObserver(ended) }
+        ended = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
+        ) { [weak self] _ in
+            self?.player.seek(to: .zero)
+            self?.player.play()
+        }
+        itemStatus = item.observe(\.status) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.update() }
+        }
+        player.replaceCurrentItem(with: item)
+        phase = .ok
+    }
+
+    private func update() {
+        if let item = player.currentItem, item.status == .failed {
+            if case .failed = phase { return }
+            phase = .failed(item.error?.localizedDescription ?? "Couldn't play this video")
+            explain()
+        } else {
+            let next: Phase = player.timeControlStatus == .waitingToPlayAtSpecifiedRate ? .buffering : .ok
+            if phase != next { phase = next }
+        }
+    }
+
+    /// AVPlayer's own errors are vague; the server's answer for the same file says more
+    /// (e.g. Instagram's link expired before the video was downloaded).
+    private func explain() {
+        let path = self.path
+        Task { @MainActor [weak self] in
+            guard let reason = await API.shared.mediaError(path), let self else { return }
+            if case .failed = self.phase { self.phase = .failed(reason) }
+        }
+    }
+}
+
+/// What a LoopPlayer is doing, drawn over its poster: a spinner while it buffers, and the
+/// reason with a retry when it fails.
+struct PlayerStatus: View {
+    let player: LoopPlayer
+
+    var body: some View {
+        Group {
+            switch player.phase {
+            case .ok:
+                EmptyView()
+            case .buffering:
+                ProgressView().tint(.white)
+            case .failed(let why):
+                Button { player.retry() } label: {
+                    VStack(spacing: 6) {
+                        Image(systemName: "arrow.clockwise").font(.title2)
+                        Text(why).font(.caption).multilineTextAlignment(.center).lineLimit(4)
+                    }
+                    .foregroundStyle(.white)
+                    .padding(12)
+                    .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 12))
+                }
+                .buttonStyle(.plain)
+                .padding(24)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

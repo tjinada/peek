@@ -8,6 +8,7 @@ struct ReelsView: View {
     @State private var next: Double?
     @State private var current: String?
     @State private var players: [String: LoopPlayer] = [:]
+    @State private var stuck: Set<String> = []  // stubs the server couldn't get a video for
     @State private var onScreen = false
     @State private var loaded = false
     @State private var loadingMore = false
@@ -20,7 +21,7 @@ struct ReelsView: View {
         ScrollView(.vertical) {
             LazyVStack(spacing: 0) {
                 ForEach(posts) { p in
-                    ReelPage(post: p, player: players[p.id]?.player, active: current == p.id, muted: $muted)
+                    ReelPage(post: p, loop: players[p.id], stuck: stuck.contains(p.id), active: current == p.id, muted: $muted)
                         .containerRelativeFrame([.horizontal, .vertical])
                         .id(p.id)
                         .onAppear { if p.id == posts.last?.id { Task { await loadMore() } } }
@@ -62,6 +63,7 @@ struct ReelsView: View {
             let r: FeedResponse = try await API.shared.get("/api/feed", ["kind": "reels", "limit": "12"])
             players.values.forEach { $0.player.pause() }
             players = [:]
+            stuck = []
             posts = r.posts
             next = r.next
             current = r.posts.first?.id
@@ -86,10 +88,14 @@ struct ReelsView: View {
 
     /// Stubs from a logged-out profile page have no media yet; fetch them when they come up.
     private func hydrate(_ p: Post) async {
-        guard p.firstVideo == nil, p.needsDetail, let full = try? await API.shared.post(p.shortcode),
-              let i = posts.firstIndex(where: { $0.id == p.id }) else { return }
-        posts[i] = full
-        sync()
+        guard p.firstVideo == nil, p.needsDetail else { return }
+        let full = try? await API.shared.post(p.shortcode)
+        if Task.isCancelled { return }  // scrolled away mid-request: not a failure
+        if let full, let i = posts.firstIndex(where: { $0.id == p.id }) {
+            posts[i] = full
+            sync()
+        }
+        if full?.firstVideo == nil { stuck.insert(p.id) } else { stuck.remove(p.id) }
     }
 
     /// Players for current ±1, playing only the current one while the tab is on screen.
@@ -115,7 +121,8 @@ struct ReelsView: View {
 
 private struct ReelPage: View {
     let post: Post
-    let player: AVPlayer?
+    let loop: LoopPlayer?
+    let stuck: Bool
     let active: Bool
     @Binding var muted: Bool
 
@@ -127,14 +134,25 @@ private struct ReelPage: View {
     private static let speeds: [Double] = [0.5, 1, 1.25, 1.5, 2]
 
     private var isSaved: Bool { saved ?? post.saved }
+    private var player: AVPlayer? { loop?.player }
 
     var body: some View {
         ZStack(alignment: .bottom) {
             Color.black
-            if let player {
-                PlayerLayerView(player: player)
-            } else {
-                RemoteImage(path: post.firstVideo?.poster ?? post.thumb, maxPixel: 1400, contentMode: .fit)
+            // The poster stays underneath: the player layer is clear until its first frame.
+            RemoteImage(path: post.firstVideo?.poster ?? post.thumb, maxPixel: 1400, contentMode: .fit)
+            if let loop {
+                PlayerLayerView(player: loop.player)
+                PlayerStatus(player: loop)
+            } else if stuck {
+                Label("Instagram hasn't given Peek this video yet", systemImage: "hourglass")
+                    .font(.footnote)
+                    .foregroundStyle(.white)
+                    .padding(10)
+                    .background(.black.opacity(0.6), in: Capsule())
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if post.firstVideo == nil {
+                ProgressView().tint(.white).frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .center, endPoint: .bottom)
                 .allowsHitTesting(false)
