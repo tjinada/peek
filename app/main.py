@@ -447,8 +447,9 @@ def feed(before: float | None = None, limit: int = 18, kind: str | None = None, 
     sql += " ORDER BY p.taken_at DESC LIMIT ?"
     args.append(limit)
     posts = _posts_out(db.rows(sql, args))
-    if kind == "reels":
-        fetcher.prefetch_videos([p["shortcode"] for p in posts])
+    # every feed page, not just Reels: a feed video that starts downloading only when it
+    # scrolls into view is usually scrolled past before it can play
+    fetcher.prefetch_videos([p["shortcode"] for p in posts])
     out = {"posts": posts, "next": posts[-1]["taken_at"] if len(posts) == limit else None}
     if before is None:
         out["seen_at"] = db.get_meta("feed_seen_at")  # newest post shown last time

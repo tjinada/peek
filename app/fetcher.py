@@ -1088,11 +1088,13 @@ def _safe_ensure(sc, idx, poster):
 
 
 _prefetching: set[tuple[str, int]] = set()
+# its own workers: in _pool these would wait behind a whole refresh's worth of downloads
+_front = ThreadPoolExecutor(max_workers=3, thread_name_prefix="peek-prefetch")
 
 
 def prefetch_videos(shortcodes: list[str]):
-    """Queue these posts' videos that aren't on disk yet. The Reels feed calls this with the
-    page it's about to return, so /m/ finds a file instead of downloading while the player
+    """Queue these posts' videos that aren't on disk yet. The feed calls this with the page
+    it's about to return, so /m/ finds a file instead of downloading while the player
     waits. Videos are otherwise last in the queue behind every image of a refresh."""
     if not shortcodes:
         return
@@ -1103,7 +1105,7 @@ def prefetch_videos(shortcodes: list[str]):
         if key in _prefetching or (r["path"] and (MEDIA_DIR / r["path"]).exists()):
             continue
         _prefetching.add(key)
-        _pool.submit(_prefetch_one, *key)
+        _front.submit(_prefetch_one, *key)
 
 
 def _prefetch_one(sc, idx):
